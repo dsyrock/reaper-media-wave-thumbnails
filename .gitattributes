@@ -1,0 +1,2 @@
+# Preserve the SDK's original formatting; it contains upstream trailing spaces.
+third_party/** -whitespace
