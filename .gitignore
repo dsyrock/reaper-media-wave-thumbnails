@@ -1,0 +1,10 @@
+/build/
+/dist/
+/test-output/
+/.uv-cache/
+*.log
+*.rpp-bak
+.env
+.env.*
+*.rk
+*.reapeaks
