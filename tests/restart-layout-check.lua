@@ -4,7 +4,7 @@ local deadline = reaper.time_precise() + 10
 local function n(s, key) return tonumber(s:match('"' .. key .. '":(%d+)')) or 0 end
 local function run()
   local s = reaper.GetExtState('MediaWaveThumbnails', 'status')
-  assert(s:find('"version":"0.3.0"', 1, true), 'Wrong test DLL: ' .. s)
+  assert(s:match('"version":"0%.3%.%d+"'), 'Wrong test DLL: ' .. s)
   if n(s, 'ready') < 20 or n(s, 'ready') ~= n(s, 'visible_files') or s:find('"first_draw_ready":-1', 1, true) then
     assert(reaper.time_precise() < deadline, 'Restart restoration timed out: ' .. s)
     reaper.defer(run); return

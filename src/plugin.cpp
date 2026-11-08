@@ -1,5 +1,7 @@
 #include "../third_party/reaper/reaper_plugin.h"
 #include "peak_reader_pool.hpp"
+#include "cpu_profile.hpp"
+#include "wave_raster.hpp"
 #include <commctrl.h>
 #include <algorithm>
 #include <array>
@@ -18,13 +20,16 @@
 namespace {
 constexpr char section[] = "MediaWaveThumbnails";
 constexpr wchar_t columnTitle[] = L"Waveform";
-constexpr char version[] = "0.3.0";
+constexpr char version[] = "0.3.1";
 constexpr int bins = 192;
-constexpr size_t bitmapLimit = 256, bitmapBudget = 16 * 1024 * 1024;
+constexpr size_t bitmapLimit = 512, bitmapBudget = 16 * 1024 * 1024;
 constexpr UINT_PTR subclassId = 0x4D575431;
 reaper_plugin_info_t host{};
 HWND explorer{}, list{};
 bool enabled = true, busy{}, rowsDirty = true;
+bool pipelinePending=true,statusDirty=true;
+uint64_t lastValidation{},lastDirectoryCheck{},lastLayoutCheck{};
+uint64_t nextIdleCheck{};
 int column = -1;
 int waveWidth = 196, columnMenuDepth{};
 int waveOrder = -1;
@@ -40,6 +45,8 @@ uint64_t peakCacheInvalidations{};
 uint64_t directPeakReads{},directPeakBytes{},directFallbacks{},jobTicket{};
 uint64_t pageChangedAt{},pageReadyMs{},pagePublications{};
 int firstDrawReady=-1;
+mwt::CpuCost timerCost,paintCost,rasterCost,scanCost,statusCost;
+uint64_t rowScans{},fileStats{},textQueries{},statusWrites{};
 mwt::PeakReaderPool peakReaders;
 uint64_t dirtySince{}, restoreLatency{};
 int observedTop = -1, observedCount = -1;
@@ -89,7 +96,7 @@ std::string json(const std::string& s) {
   return out+'"';
 }
 using Stamp=mwt::FileStamp;
-bool stamp(const std::wstring& path,Stamp& out){return mwt::fileStamp(path,out);}
+bool stamp(const std::wstring& path,Stamp& out){++fileStats;return mwt::fileStamp(path,out);}
 struct Wave {
   Stamp stamp;
   std::array<float,bins> high{},low{};
@@ -106,7 +113,8 @@ struct Wave {
 // LRU eviction; losing a surface must never cause another source/peak read.
 std::map<std::wstring,Wave> cache;
 std::map<int,std::wstring> rows;
-using BitmapKey = std::tuple<std::wstring,uint64_t,int,int,COLORREF,COLORREF>;
+std::map<int,Wave*> rowWaves;
+using BitmapKey = std::tuple<uint64_t,int,int,COLORREF,COLORREF>;
 struct Raster {
   HBITMAP handle{};
   size_t bytes{};
@@ -123,8 +131,9 @@ HDC bitmapDC{};
 
 void clearBitmaps(){bitmaps.clear();bitmapBytes=0;}
 void discardBitmaps(const std::wstring& path) {
+  auto wave=cache.find(path);if(wave==cache.end())return;
   for(auto it=bitmaps.begin();it!=bitmaps.end();) {
-    if(std::get<0>(it->first)==path){bitmapBytes-=it->second.bytes;it=bitmaps.erase(it);}
+    if(std::get<0>(it->first)==wave->second.revision){bitmapBytes-=it->second.bytes;it=bitmaps.erase(it);}
     else ++it;
   }
 }
@@ -135,7 +144,7 @@ void reserveBitmap(size_t bytes) {
   }
 }
 void dirtyRows() {
-  rows.clear();rowsDirty=true;
+  rowWaves.clear();rows.clear();rowsDirty=true;pipelinePending=true;statusDirty=true;
   pageChangedAt=GetTickCount64();firstDrawReady=-1;
   if(!dirtySince)dirtySince=GetTickCount64();
 }
@@ -156,17 +165,19 @@ bool currentPeakFile(const std::wstring& path,const Wave& wave,bool& stale,std::
 // OWNERDATA list text belongs to REAPER. Ask its existing notification handler
 // for each original cell instead of reading private row pointers.
 std::wstring textAt(int row,int subitem) {
-  std::array<wchar_t,32768> buffer{};
+  ++textQueries;
+  std::array<wchar_t,32768> buffer;
+  buffer.front()=0;
   NMLVDISPINFOW n{};
   n.hdr={list,UINT_PTR(GetDlgCtrlID(list)),LVN_GETDISPINFOW};
   n.item.mask=LVIF_TEXT;n.item.iItem=row;n.item.iSubItem=subitem;
   n.item.pszText=buffer.data();n.item.cchTextMax=int(buffer.size());
   SendMessageW(explorer,WM_NOTIFY,n.hdr.idFrom,LPARAM(&n));
+  buffer.back()=0;
   if(n.item.pszText && n.item.pszText!=LPSTR_TEXTCALLBACKW)return n.item.pszText;
   return {};
 }
-bool isFile(const std::wstring& p) {Stamp s;return stamp(p,s);}
-std::wstring resolveFile(int row) {
+std::wstring resolveFile(int row,Stamp* found=nullptr) {
   std::wstring name=textAt(row,0),ext=textAt(row,3);
   if(name.empty()||name==L"..")return {};
   if(!ext.empty() && ext.front()==L'.')ext.erase(0,1);
@@ -175,9 +186,14 @@ std::wstring resolveFile(int row) {
   for(const auto& n:names) {
     auto suffix=std::filesystem::path(n).extension().wstring();
     if(suffix.empty()||!IsMediaExtension(utf8(suffix.substr(1)).c_str(),false))continue;
-    if(isFile(n))return std::filesystem::path(n).lexically_normal().wstring();
-    auto full=(std::filesystem::path(currentDirectory)/n).wstring();
-    if(isFile(full))return std::filesystem::path(full).lexically_normal().wstring();
+    std::filesystem::path candidate(n);
+    if(!candidate.is_absolute()) {
+      std::filesystem::path directory(currentDirectory);
+      if(!directory.is_absolute())continue;
+      candidate=directory/candidate;
+    }
+    Stamp value;
+    if(stamp(candidate.wstring(),value)){if(found)*found=value;return candidate.lexically_normal().wstring();}
   }
   return {};
 }
@@ -188,7 +204,14 @@ void stopBuild() {
   }
   activeSource=nullptr;activePath.clear();building=false;
 }
-void invalidate() {if(IsWindow(list))InvalidateRect(list,nullptr,FALSE);}
+void invalidate(int row=-1) {
+  statusDirty=true;
+  if(!IsWindow(list)||column<0||ListView_GetItemCount(list)<=0)return;
+  RECT cell{},client{};
+  if(!ListView_GetSubItemRect(list,row>=0?row:std::max(0,ListView_GetTopIndex(list)),column,LVIR_BOUNDS,&cell)||!GetClientRect(list,&client))return;
+  RECT rect{std::max(cell.left,client.left),std::max(cell.top,client.top),std::min(cell.right,client.right),row>=0?std::min(cell.bottom,client.bottom):client.bottom};
+  if(rect.left<rect.right&&rect.top<rect.bottom)InvalidateRect(list,&rect,FALSE);
+}
 bool readWave(bool retryOnEmpty) {
   auto it=cache.find(activePath);
   if(it==cache.end()){stopBuild();return true;}
@@ -224,6 +247,7 @@ bool readWave(bool retryOnEmpty) {
 }
 bool processNext() {
   if(activeSource) {
+    statusDirty=true;
     if(GetTickCount64()-buildStarted>30000) {
       cache[activePath].state=-1;lastError="Peak build exceeded 30 seconds";stopBuild();return true;
     }
@@ -234,6 +258,7 @@ bool processNext() {
   for(auto& [row,path]:rows) {
     auto it=cache.find(path);
     if(it==cache.end()||it->second.state!=0||it->second.loading||!it->second.directTried||it->second.retryAfter>GetTickCount64())continue;
+    statusDirty=true;
     bool stale=false;
     std::wstring peakPath;
     bool haveCurrentPeaks=currentPeakFile(path,it->second,stale,peakPath);
@@ -292,6 +317,7 @@ void takeDirectResults() {
     auto it=cache.find(result.job.path);
     if(it==cache.end()||it->second.revision!=result.job.revision||it->second.ticket!=result.job.ticket)continue;
     auto& wave=it->second;wave.loading=false;
+    pipelinePending=true;statusDirty=true;
     Stamp now;
     if(!stamp(result.job.path,now)||!(now==wave.stamp)) {
       discardBitmaps(result.job.path);
@@ -323,7 +349,7 @@ void queueDirectReads() {
 }
 int publishedRows() {
   int ready=0;
-  for(const auto& row:rows){auto it=cache.find(row.second);if(it!=cache.end()&&it->second.state==1&&it->second.published)++ready;}
+  for(const auto& row:rowWaves)if(row.second->state==1&&row.second->published)++ready;
   return ready;
 }
 void publishPreparedPage() {
@@ -331,12 +357,14 @@ void publishPreparedPage() {
     const auto& wave=cache.at(row.second);
     if(wave.loading||(wave.batchRead&&wave.state==0))return;
   }
-  bool changed=false;
+  int changed=0,changedRow=-1;
   for(const auto& row:rows) {
     auto& wave=cache.at(row.second);
-    if(wave.state==1&&!wave.published){wave.published=true;changed=true;}
+    if(wave.state==1&&!wave.published){wave.published=true;++changed;changedRow=row.first;}
   }
-  if(changed){++pagePublications;pageReadyMs=GetTickCount64()-pageChangedAt;invalidate();}
+  if(changed){++pagePublications;pageReadyMs=GetTickCount64()-pageChangedAt;invalidate(changed==1?changedRow:-1);}
+  pipelinePending=activeSource!=nullptr;
+  for(const auto& row:rowWaves)if(row.second->state==0){pipelinePending=true;break;}
 }
 void drawEnvelope(HDC dc,const RECT& r,const Wave& wave,COLORREF color) {
   HPEN pen=CreatePen(PS_SOLID,1,color);
@@ -353,25 +381,19 @@ void drawEnvelope(HDC dc,const RECT& r,const Wave& wave,COLORREF color) {
   }
   SelectObject(dc,old);DeleteObject(pen);
 }
-bool blitWave(HDC target,const RECT& r,const std::wstring& path,const Wave& wave,COLORREF fg,COLORREF bg) {
+bool blitWave(HDC target,const RECT& r,const Wave& wave,COLORREF fg,COLORREF bg) {
   int width=r.right-r.left,height=r.bottom-r.top;
   size_t bytes=size_t(width)*height*4;
   if(bytes>bitmapBudget)return false;
   if(!bitmapDC)bitmapDC=CreateCompatibleDC(target);
   if(!bitmapDC)return false;
-  BitmapKey key{path,wave.revision,width,height,fg,bg};
+  BitmapKey key{wave.revision,width,height,fg,bg};
   auto it=bitmaps.find(key);
   bool hit=it!=bitmaps.end();
   if(!hit) {
-    Raster raster(CreateCompatibleBitmap(target,width,height),bytes,++bitmapTick);
+    mwt::CpuScope measure(rasterCost);
+    Raster raster(mwt::rasterWave(target,width,height,wave.high,wave.low,wave.peak,fg,bg),bytes,++bitmapTick);
     if(!raster.handle)return false;
-    HGDIOBJ old=SelectObject(bitmapDC,raster.handle);
-    RECT bounds{0,0,width,height};
-    HBRUSH brush=CreateSolidBrush(bg);
-    if(!brush){SelectObject(bitmapDC,old);return false;}
-    FillRect(bitmapDC,&bounds,brush);DeleteObject(brush);
-    drawEnvelope(bitmapDC,bounds,wave,fg);
-    SelectObject(bitmapDC,old);
     reserveBitmap(bytes);
     it=bitmaps.try_emplace(std::move(key),std::move(raster)).first;
     bitmapBytes+=bytes;++bitmapBuilds;
@@ -384,23 +406,25 @@ bool blitWave(HDC target,const RECT& r,const std::wstring& path,const Wave& wave
   return copied;
 }
 void paintWave(NMLVCUSTOMDRAW* n) {
+  mwt::CpuScope measure(paintCost);
+  statusDirty=true;
   int row=int(n->nmcd.dwItemSpec);RECT r{};
   if(!ListView_GetSubItemRect(list,row,column,LVIR_BOUNDS,&r))return;
   COLORREF bg=ListView_GetTextBkColor(list);
   if(bg==CLR_NONE)bg=ListView_GetBkColor(list);
   bool selected=ListView_GetItemState(list,row,LVIS_SELECTED)!=0;
   if(selected)bg=GetSysColor(COLOR_HIGHLIGHT);
-  HBRUSH brush=CreateSolidBrush(bg);FillRect(n->nmcd.hdc,&r,brush);DeleteObject(brush);
-  auto rowIt=rows.find(row);
-  if(rowIt==rows.end())return;
-  auto it=cache.find(rowIt->second);if(it==cache.end())return;
-  auto& wave=it->second;
+  COLORREF oldBrush=SetDCBrushColor(n->nmcd.hdc,bg);
+  FillRect(n->nmcd.hdc,&r,reinterpret_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+  SetDCBrushColor(n->nmcd.hdc,oldBrush);
+  auto rowIt=rowWaves.find(row);if(rowIt==rowWaves.end())return;
+  auto& wave=*rowIt->second;
   r.left+=6;r.right-=6;r.top+=3;r.bottom-=3;
   if(r.right<=r.left||r.bottom<=r.top)return;
   COLORREF color=selected?GetSysColor(COLOR_HIGHLIGHTTEXT):RGB(55,166,152);
   if(wave.state==1&&wave.published) {
     if(firstDrawReady<0)firstDrawReady=publishedRows();
-    if(!blitWave(n->nmcd.hdc,r,rowIt->second,wave,color,bg))drawEnvelope(n->nmcd.hdc,r,wave,color);
+    if(!blitWave(n->nmcd.hdc,r,wave,color,bg))drawEnvelope(n->nmcd.hdc,r,wave,color);
     ++draws;
   }else if(wave.state==0) {
     HPEN pen=CreatePen(PS_SOLID,1,color);HGDIOBJ old=SelectObject(n->nmcd.hdc,pen);
@@ -427,7 +451,7 @@ void saveWaveLayout(bool force=false) {
       int width=ListView_GetColumnWidth(list,column);
       if(item.iOrder!=waveOrder||width!=waveWidth) {
         waveOrder=item.iOrder;waveWidth=width;
-        layoutPending=true;layoutChangedAt=GetTickCount64();
+        layoutPending=true;layoutChangedAt=GetTickCount64();statusDirty=true;
       }
     }
   }
@@ -435,7 +459,7 @@ void saveWaveLayout(bool force=false) {
     auto order=std::to_string(waveOrder),width=std::to_string(waveWidth);
     SetExtState(section,"wave_order",order.c_str(),true);
     SetExtState(section,"wave_width",width.c_str(),true);
-    layoutPending=false;
+    layoutPending=false;statusDirty=true;
   }
 }
 void removeWaveColumn() {
@@ -579,28 +603,31 @@ bool attach() {
   observedTop=observedCount=-1;rowsDirty=true;lastScan=0;return true;
 }
 void scanRows() {
+  mwt::CpuScope measure(scanCost);++rowScans;
   rowsDirty=false;
   auto directory=windowText(GetDlgItem(explorer,1002));
-  if(directory!=currentDirectory)rows.clear();
+  if(directory!=currentDirectory){rowWaves.clear();rows.clear();}
   currentDirectory=std::move(directory);
   std::map<int,std::wstring> next;
   int first=std::max(0,ListView_GetTopIndex(list));
   int last=std::min(ListView_GetItemCount(list),first+ListView_GetCountPerPage(list)+2);
+  std::vector<Stamp> stamps(size_t(std::max(0,last-first)));
   std::vector<int> unresolved;
   for(int row=first;row<last;++row) {
-    auto path=resolveFile(row);
+    Stamp value;
+    auto path=resolveFile(row,&value);
     if(path.empty()) {
       auto ext=textAt(row,3);
       if(!ext.empty()&&IsMediaExtension(utf8(ext).c_str(),false)) {
         auto previous=rows.find(row);
         if(previous!=rows.end()) {
           auto name=textAt(row,0),base=std::filesystem::path(previous->second).filename().wstring();
-          if(name==base||name+L"."+ext==base)path=previous->second;
+          if((name==base||name+L"."+ext==base)&&stamp(previous->second,value))path=previous->second;
         }
         if(path.empty())unresolved.push_back(row);
       }
     }
-    if(!path.empty())next.emplace(row,path);
+    if(!path.empty()){next.emplace(row,path);stamps[size_t(row-first)]=value;}
   }
   if(!unresolved.empty()&&GetToggleState(32063,42026)==0) {
     // Query the native database/search rows synchronously, then restore both
@@ -610,8 +637,8 @@ void scanRows() {
     ++pathLookups;
     try {
       for(int row:unresolved) {
-        auto path=resolveFile(row);
-        if(!path.empty())next[row]=path;
+        Stamp value;auto path=resolveFile(row,&value);
+        if(!path.empty()){next[row]=path;stamps[size_t(row-first)]=value;}
       }
     }catch(...) {
       SendMessageW(explorer,WM_COMMAND,42026,0);
@@ -623,25 +650,44 @@ void scanRows() {
   }
   for(auto it=next.begin();it!=next.end();) {
     const auto& path=it->second;
-    Stamp fileStamp;
-    if(!stamp(path,fileStamp)){it=next.erase(it);continue;}
+    Stamp fileStamp=stamps.at(size_t(it->first-first));
     auto [entry,inserted]=cache.try_emplace(path);
     if(inserted||!(entry->second.stamp==fileStamp)) {
       if(path==activePath)stopBuild();
       discardBitmaps(path);
       entry->second=Wave{};entry->second.stamp=fileStamp;entry->second.revision=++waveRevision;
       entry->second.sourceChanged=!inserted;
+      pipelinePending=true;statusDirty=true;
     }
     ++it;
   }
-  if(rows!=next){rows=std::move(next);pageChangedAt=GetTickCount64();firstDrawReady=-1;retainVisibleReads();invalidate();}
+  bool changed=rows!=next;
+  if(changed){rowWaves.clear();rows=std::move(next);pageChangedAt=GetTickCount64();firstDrawReady=-1;retainVisibleReads();}
+  if(changed||rowWaves.size()!=rows.size()) {
+    rowWaves.clear();for(const auto& row:rows)rowWaves.emplace(row.first,&cache.at(row.second));
+  }
+  if(changed){pipelinePending=true;invalidate();}
   if(activeSource && std::none_of(rows.begin(),rows.end(),[](const auto& row){return row.second==activePath;}))stopBuild();
   observedTop=first;observedCount=ListView_GetItemCount(list);
   if(dirtySince){restoreLatency=GetTickCount64()-dirtySince;dirtySince=0;}
 }
+void validateVisibleRows() {
+  for(const auto& row:rows) {
+    Stamp now;
+    if(!stamp(row.second,now)){rowsDirty=true;pipelinePending=true;return;}
+    auto& wave=*rowWaves.at(row.first);
+    if(!(wave.stamp==now)) {
+      if(row.second==activePath)stopBuild();
+      discardBitmaps(row.second);
+      wave=Wave{};wave.stamp=now;wave.revision=++waveRevision;wave.sourceChanged=true;
+      pipelinePending=true;invalidate(row.first);
+    }
+  }
+}
 void publishStatus() {
+  mwt::CpuScope measure(statusCost);++statusWrites;
   std::ostringstream s;
-  int ready=0;for(const auto& [r,p]:rows){auto it=cache.find(p);if(it!=cache.end()&&it->second.state==1)++ready;}
+  int ready=0;for(const auto& row:rowWaves)if(row.second->state==1)++ready;
   s<<"{\"version\":"<<json(version)<<",\"enabled\":"<<(enabled?"true":"false")
    <<",\"attached\":"<<(ownsColumn()?"true":"false")<<",\"column\":"<<column
    <<",\"visible_files\":"<<rows.size()<<",\"ready\":"<<ready<<",\"cache\":"<<cache.size()
@@ -652,6 +698,14 @@ void publishStatus() {
    <<",\"direct_peak_reads\":"<<directPeakReads<<",\"direct_peak_bytes\":"<<directPeakBytes<<",\"direct_fallbacks\":"<<directFallbacks
    <<",\"published_ready\":"<<publishedRows()<<",\"first_draw_ready\":"<<firstDrawReady<<",\"page_ready_ms\":"<<pageReadyMs
    <<",\"page_publications\":"<<pagePublications
+   <<",\"row_scans\":"<<rowScans<<",\"file_stats\":"<<fileStats<<",\"text_queries\":"<<textQueries<<",\"status_writes\":"<<statusWrites
+   <<",\"cpu_timer_ms\":"<<mwt::milliseconds(timerCost)<<",\"cpu_paint_ms\":"<<mwt::milliseconds(paintCost)
+   <<",\"cpu_raster_ms\":"<<mwt::milliseconds(rasterCost)<<",\"cpu_scan_ms\":"<<mwt::milliseconds(scanCost)
+   <<",\"cpu_status_ms\":"<<mwt::milliseconds(statusCost)
+   <<",\"cpu_timer_cycles\":"<<timerCost.cycles<<",\"cpu_paint_cycles\":"<<paintCost.cycles
+#ifdef MWT_PROFILE
+   <<",\"profile_enabled\":true"
+#endif
    <<",\"wave_order\":"<<waveOrder<<",\"wave_width\":"<<waveWidth<<",\"layout_pending\":"<<(layoutPending?"true":"false")
    <<",\"bitmap_builds\":"<<bitmapBuilds<<",\"bitmap_hits\":"<<bitmapHits
    <<",\"bitmap_cache\":"<<bitmaps.size()<<",\"bitmap_bytes\":"<<bitmapBytes<<",\"bitmap_evictions\":"<<bitmapEvictions
@@ -663,13 +717,23 @@ void publishStatus() {
     first=false;const auto& wave=cache.at(p);
     s<<"{\"row\":"<<r<<",\"path\":"<<json(utf8(p))<<",\"state\":"<<wave.state<<",\"peak\":"<<wave.peak<<'}';
   }
-  s<<"]}";SetExtState(section,"status",s.str().c_str(),false);
+  s<<"]}";SetExtState(section,"status",s.str().c_str(),false);statusDirty=false;
 }
 void timer() {
   if(busy)return;
+  mwt::CpuScope measure(timerCost);
   busy=true;
   try {
     auto now=GetTickCount64();
+#ifdef MWT_PROFILE
+    const char* command=GetExtState(section,"profile_command");
+    if(command&&std::string(command)=="drop_bitmaps") {
+      clearBitmaps();invalidate();SetExtState(section,"profile_command","",false);
+    }
+#endif
+    bool statusDue=statusDirty&&now-lastStatus>=300;
+    if(!rowsDirty&&!pipelinePending&&!layoutPending&&!statusDue&&now<nextIdleCheck){busy=false;return;}
+    nextIdleCheck=now+100;
     takeDirectResults();
     if(enabled) {
       if(list&&!IsWindow(list))detach();
@@ -677,17 +741,24 @@ void timer() {
       if(list) {
         bool haveColumn=ownsColumn();
         if(!haveColumn&&!columnMenuDepth&&now>=columnsReadyAfter)haveColumn=addWaveColumn();
-        if(haveColumn)saveWaveLayout();
+        if(haveColumn&&(layoutPending||now-lastLayoutCheck>=500)){lastLayoutCheck=now;saveWaveLayout();}
         if(haveColumn&&IsWindowVisible(list)) {
-          if(rowsDirty||ListView_GetTopIndex(list)!=observedTop||ListView_GetItemCount(list)!=observedCount||now-lastScan>=1000) {
-            lastScan=now;scanRows();
+          bool changed=rowsDirty||ListView_GetTopIndex(list)!=observedTop||ListView_GetItemCount(list)!=observedCount;
+          if(!changed&&now-lastDirectoryCheck>=250) {
+            lastDirectoryCheck=now;changed=windowText(GetDlgItem(explorer,1002))!=currentDirectory;
           }
-          queueDirectReads();processQueue();publishPreparedPage();
+          if(changed){lastScan=lastValidation=lastDirectoryCheck=now;scanRows();}
+          else if(now-lastValidation>=1000){lastValidation=now;validateVisibleRows();}
+          if(pipelinePending){queueDirectReads();processQueue();publishPreparedPage();}
         }
       }
     }
-    if(now-lastStatus>=300){lastStatus=now;publishStatus();}
-  }catch(const std::exception& e){lastError=e.what();stopBuild();}
+    bool update=statusDirty;
+#ifdef MWT_PROFILE
+    update=true;
+#endif
+    if(update&&now-lastStatus>=300){lastStatus=now;publishStatus();}
+  }catch(const std::exception& e){lastError=e.what();statusDirty=true;stopBuild();}
   busy=false;
 }
 bool hookCommand(int cmd,int) {
@@ -696,7 +767,7 @@ bool hookCommand(int cmd,int) {
     SetExtState(section,"enabled",enabled?"1":"0",true);publishStatus();return true;
   }
   if(cmd==refreshAction.accel.cmd) {
-    stopBuild();peakReaders.retain({});clearBitmaps();cache.clear();dirtyRows();lastScan=0;lastError.clear();invalidate();publishStatus();return true;
+    stopBuild();peakReaders.retain({});clearBitmaps();dirtyRows();cache.clear();lastScan=0;lastError.clear();invalidate();publishStatus();return true;
   }
   return false;
 }

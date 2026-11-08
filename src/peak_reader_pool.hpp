@@ -1,6 +1,7 @@
 #pragma once
 #include "reapeaks_reader.hpp"
 #include <condition_variable>
+#include <atomic>
 #include <deque>
 #include <mutex>
 #include <set>
@@ -24,8 +25,10 @@ class PeakReaderPool {
   std::deque<PeakJob> pending;
   std::vector<PeakCompletion> completed;
   std::vector<std::thread> threads;
+  std::atomic<unsigned> readyCount{0};
   bool stopping=true;
   void run() {
+    SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
     for(;;) {
       PeakJob job;
       {
@@ -38,7 +41,7 @@ class PeakReaderPool {
       try {result.result=readPeaks(result.job.path,result.job.peakPath,result.job.stamp,result.data);}
       catch(const std::exception&) {result.result=PeakResult::Unsupported;}
       std::lock_guard<std::mutex> lock(mutex);
-      if(!stopping)completed.push_back(std::move(result));
+      if(!stopping){completed.push_back(std::move(result));readyCount.fetch_add(1,std::memory_order_release);}
     }
   }
 public:
@@ -64,8 +67,9 @@ public:
   }
   std::vector<PeakCompletion> take() {
     std::vector<PeakCompletion> result;
+    if(!readyCount.load(std::memory_order_acquire))return result;
     std::lock_guard<std::mutex> lock(mutex);
-    result.swap(completed);return result;
+    result.swap(completed);readyCount.store(0,std::memory_order_relaxed);return result;
   }
   void stop() {
     {
@@ -73,7 +77,7 @@ public:
       stopping=true;pending.clear();wake.notify_all();
     }
     for(auto& thread:threads)if(thread.joinable())thread.join();
-    threads.clear();completed.clear();
+    threads.clear();completed.clear();readyCount.store(0,std::memory_order_relaxed);
   }
 };
 }

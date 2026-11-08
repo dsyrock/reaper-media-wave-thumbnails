@@ -2,7 +2,7 @@ local deadline = reaper.time_precise() + 15
 local function n(s, key) return tonumber(s:match('"' .. key .. '":(%d+)')) or 0 end
 local function run()
   local s = reaper.GetExtState('MediaWaveThumbnails', 'status')
-  assert(s:find('"version":"0.3.0"', 1, true), 'Wrong DLL')
+  assert(s:match('"version":"0%.3%.%d+"'), 'Wrong DLL')
   assert(reaper.time_precise() < deadline, 'Startup page timeout: ' .. s)
   if not s:find('RealLibrary', 1, true) or n(s, 'published_ready') < 20 or
       n(s, 'published_ready') ~= n(s, 'visible_files') or s:find('"first_draw_ready":-1', 1, true) then

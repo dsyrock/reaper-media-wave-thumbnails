@@ -75,7 +75,7 @@ local task = coroutine.create(function()
   pause(.5)
   local s = status()
   assert(num(s, 'cache') >= 640, 'Peak cache still evicts old entries')
-  assert(num(s, 'bitmap_cache') <= 256 and num(s, 'bitmap_bytes') <= 16 * 1024 * 1024, 'Bitmap cache exceeded budget')
+  assert(num(s, 'bitmap_cache') <= 512 and num(s, 'bitmap_bytes') <= 16 * 1024 * 1024, 'Bitmap cache exceeded budget')
   assert(num(s, 'bitmap_evictions') > 0, 'Test never exercised bitmap eviction')
   print('PASS visited 640 files; retained=' .. num(s, 'cache') ..
     '; peak_array_bytes=' .. num(s, 'peak_array_bytes') .. '; bitmap_evictions=' .. num(s, 'bitmap_evictions'))
