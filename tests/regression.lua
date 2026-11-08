@@ -30,7 +30,7 @@ local function run()
   assert(reaper.time_precise() - started < 25, 'Phase ' .. phase .. ' timed out: ' .. s)
   assert(s:find('"error":""', 1, true), s)
   local rows = files(s)
-  if phase == 1 and number(s, 'ready') >= 20 then
+  if phase == 1 and number(s, 'ready') >= 20 and s:find('01_鼓点中文.wav', 1, true) then
     local expected = {['01_鼓点中文.wav'] = .8, ['02_stereo.wav'] = .5, ['03_silence.wav'] = 0}
     for _, file in ipairs(rows) do
       for name, amplitude in pairs(expected) do

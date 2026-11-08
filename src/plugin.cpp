@@ -1,4 +1,5 @@
 #include "../third_party/reaper/reaper_plugin.h"
+#include "peak_reader_pool.hpp"
 #include <commctrl.h>
 #include <algorithm>
 #include <array>
@@ -17,7 +18,7 @@
 namespace {
 constexpr char section[] = "MediaWaveThumbnails";
 constexpr wchar_t columnTitle[] = L"Waveform";
-constexpr char version[] = "0.2.2";
+constexpr char version[] = "0.3.0";
 constexpr int bins = 192;
 constexpr size_t bitmapLimit = 256, bitmapBudget = 16 * 1024 * 1024;
 constexpr UINT_PTR subclassId = 0x4D575431;
@@ -36,6 +37,10 @@ uint64_t waveRevision{}, bitmapTick{}, draws{}, builds{}, pathLookups{}, lastSca
 uint64_t sourceOpens{}, peakReads{}, bitmapBuilds{}, bitmapHits{}, bitmapEvictions{};
 uint64_t fastPeakHits{}, peakBuildStarts{}, peakBuildProbes{};
 uint64_t peakCacheInvalidations{};
+uint64_t directPeakReads{},directPeakBytes{},directFallbacks{},jobTicket{};
+uint64_t pageChangedAt{},pageReadyMs{},pagePublications{};
+int firstDrawReady=-1;
+mwt::PeakReaderPool peakReaders;
 uint64_t dirtySince{}, restoreLatency{};
 int observedTop = -1, observedCount = -1;
 std::string lastError;
@@ -83,16 +88,8 @@ std::string json(const std::string& s) {
   }
   return out+'"';
 }
-struct Stamp {
-  uint64_t size{}, time{};
-  bool operator==(const Stamp& b) const {return size==b.size&&time==b.time;}
-};
-bool stamp(const std::wstring& path,Stamp& out) {
-  WIN32_FILE_ATTRIBUTE_DATA a{};
-  if(!GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&a)||(a.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY))return false;
-  out={uint64_t(a.nFileSizeHigh)<<32|a.nFileSizeLow,uint64_t(a.ftLastWriteTime.dwHighDateTime)<<32|a.ftLastWriteTime.dwLowDateTime};
-  return true;
-}
+using Stamp=mwt::FileStamp;
+bool stamp(const std::wstring& path,Stamp& out){return mwt::fileStamp(path,out);}
 struct Wave {
   Stamp stamp;
   std::array<float,bins> high{},low{};
@@ -102,6 +99,8 @@ struct Wave {
   uint64_t revision{};
   float peak{};
   bool sourceChanged{};
+  bool directTried{},loading{},published{},batchRead{};
+  uint64_t ticket{};
 };
 // Peak arrays live for the whole session. Only disposable render surfaces use
 // LRU eviction; losing a surface must never cause another source/peak read.
@@ -137,6 +136,7 @@ void reserveBitmap(size_t bytes) {
 }
 void dirtyRows() {
   rows.clear();rowsDirty=true;
+  pageChangedAt=GetTickCount64();firstDrawReady=-1;
   if(!dirtySince)dirtySince=GetTickCount64();
 }
 PCM_source* activeSource{};
@@ -220,7 +220,7 @@ bool readWave(bool retryOnEmpty) {
     wave.state=++wave.attempts>=5?-1:0;
     wave.retryAfter=GetTickCount64()+500;
   }
-  stopBuild();invalidate();return true;
+  stopBuild();return true;
 }
 bool processNext() {
   if(activeSource) {
@@ -233,7 +233,7 @@ bool processNext() {
   }
   for(auto& [row,path]:rows) {
     auto it=cache.find(path);
-    if(it==cache.end()||it->second.state!=0||it->second.retryAfter>GetTickCount64())continue;
+    if(it==cache.end()||it->second.state!=0||it->second.loading||!it->second.directTried||it->second.retryAfter>GetTickCount64())continue;
     bool stale=false;
     std::wstring peakPath;
     bool haveCurrentPeaks=currentPeakFile(path,it->second,stale,peakPath);
@@ -265,7 +265,7 @@ bool processNext() {
     }
     ++peakBuildProbes;
     buildStarted=GetTickCount64();building=BuildPeaks(activeSource,0)!=0;
-    if(building)++peakBuildStarts;
+    if(building){++peakBuildStarts;it->second.batchRead=false;}
     else readWave(true);
     return !building;
   }
@@ -278,6 +278,65 @@ void processQueue() {
   for(int n=0;n<64;++n) {
     if(!processNext()||GetTickCount64()-started>=8)break;
   }
+}
+void retainVisibleReads() {
+  std::set<std::wstring> paths;
+  for(const auto& row:rows)paths.insert(row.second);
+  for(const auto& job:peakReaders.retain(paths)) {
+    auto it=cache.find(job.path);
+    if(it!=cache.end()&&it->second.ticket==job.ticket){it->second.loading=false;it->second.directTried=false;it->second.batchRead=false;it->second.ticket=0;}
+  }
+}
+void takeDirectResults() {
+  for(auto& result:peakReaders.take()) {
+    auto it=cache.find(result.job.path);
+    if(it==cache.end()||it->second.revision!=result.job.revision||it->second.ticket!=result.job.ticket)continue;
+    auto& wave=it->second;wave.loading=false;
+    Stamp now;
+    if(!stamp(result.job.path,now)||!(now==wave.stamp)) {
+      discardBitmaps(result.job.path);
+      wave=Wave{};wave.stamp=now;wave.revision=++waveRevision;wave.sourceChanged=true;wave.directTried=true;
+      rowsDirty=true;continue;
+    }
+    if(result.result==mwt::PeakResult::Ready) {
+      wave.high=result.data.high;wave.low=result.data.low;wave.peak=result.data.peak;
+      wave.state=1;wave.published=false;++directPeakReads;++builds;directPeakBytes+=result.data.bytesRead;
+    }else {
+      if(result.result==mwt::PeakResult::Stale){wave.sourceChanged=true;wave.batchRead=false;}
+      ++directFallbacks;
+    }
+  }
+}
+void queueDirectReads() {
+  // Wait briefly for the native visible row set to settle, then dispatch the
+  // whole page. Workers only read cache files; REAPER/GDI stay on this thread.
+  if(GetTickCount64()-pageChangedAt<80)return;
+  for(const auto& [row,path]:rows) {
+    auto& wave=cache.at(path);
+    if(wave.state!=0||wave.loading||wave.directTried)continue;
+    wave.directTried=true;
+    bool stale=false;std::wstring peakPath;
+    if(!currentPeakFile(path,wave,stale,peakPath))continue;
+    wave.ticket=++jobTicket;wave.loading=true;wave.batchRead=true;
+    if(!peakReaders.submit({path,peakPath,wave.stamp,wave.revision,wave.ticket}))wave.loading=false;
+  }
+}
+int publishedRows() {
+  int ready=0;
+  for(const auto& row:rows){auto it=cache.find(row.second);if(it!=cache.end()&&it->second.state==1&&it->second.published)++ready;}
+  return ready;
+}
+void publishPreparedPage() {
+  for(const auto& row:rows) {
+    const auto& wave=cache.at(row.second);
+    if(wave.loading||(wave.batchRead&&wave.state==0))return;
+  }
+  bool changed=false;
+  for(const auto& row:rows) {
+    auto& wave=cache.at(row.second);
+    if(wave.state==1&&!wave.published){wave.published=true;changed=true;}
+  }
+  if(changed){++pagePublications;pageReadyMs=GetTickCount64()-pageChangedAt;invalidate();}
 }
 void drawEnvelope(HDC dc,const RECT& r,const Wave& wave,COLORREF color) {
   HPEN pen=CreatePen(PS_SOLID,1,color);
@@ -339,7 +398,8 @@ void paintWave(NMLVCUSTOMDRAW* n) {
   r.left+=6;r.right-=6;r.top+=3;r.bottom-=3;
   if(r.right<=r.left||r.bottom<=r.top)return;
   COLORREF color=selected?GetSysColor(COLOR_HIGHLIGHTTEXT):RGB(55,166,152);
-  if(wave.state==1) {
+  if(wave.state==1&&wave.published) {
+    if(firstDrawReady<0)firstDrawReady=publishedRows();
     if(!blitWave(n->nmcd.hdc,r,rowIt->second,wave,color,bg))drawEnvelope(n->nmcd.hdc,r,wave,color);
     ++draws;
   }else if(wave.state==0) {
@@ -574,7 +634,7 @@ void scanRows() {
     }
     ++it;
   }
-  if(rows!=next){rows=std::move(next);invalidate();}
+  if(rows!=next){rows=std::move(next);pageChangedAt=GetTickCount64();firstDrawReady=-1;retainVisibleReads();invalidate();}
   if(activeSource && std::none_of(rows.begin(),rows.end(),[](const auto& row){return row.second==activePath;}))stopBuild();
   observedTop=first;observedCount=ListView_GetItemCount(list);
   if(dirtySince){restoreLatency=GetTickCount64()-dirtySince;dirtySince=0;}
@@ -589,6 +649,9 @@ void publishStatus() {
    <<",\"source_opens\":"<<sourceOpens<<",\"peak_reads\":"<<peakReads
    <<",\"fast_peak_hits\":"<<fastPeakHits<<",\"peak_build_probes\":"<<peakBuildProbes<<",\"peak_build_starts\":"<<peakBuildStarts
    <<",\"peak_cache_invalidations\":"<<peakCacheInvalidations
+   <<",\"direct_peak_reads\":"<<directPeakReads<<",\"direct_peak_bytes\":"<<directPeakBytes<<",\"direct_fallbacks\":"<<directFallbacks
+   <<",\"published_ready\":"<<publishedRows()<<",\"first_draw_ready\":"<<firstDrawReady<<",\"page_ready_ms\":"<<pageReadyMs
+   <<",\"page_publications\":"<<pagePublications
    <<",\"wave_order\":"<<waveOrder<<",\"wave_width\":"<<waveWidth<<",\"layout_pending\":"<<(layoutPending?"true":"false")
    <<",\"bitmap_builds\":"<<bitmapBuilds<<",\"bitmap_hits\":"<<bitmapHits
    <<",\"bitmap_cache\":"<<bitmaps.size()<<",\"bitmap_bytes\":"<<bitmapBytes<<",\"bitmap_evictions\":"<<bitmapEvictions
@@ -607,6 +670,7 @@ void timer() {
   busy=true;
   try {
     auto now=GetTickCount64();
+    takeDirectResults();
     if(enabled) {
       if(list&&!IsWindow(list))detach();
       if(!list && now-lastScan>=500){lastScan=now;attach();}
@@ -618,7 +682,7 @@ void timer() {
           if(rowsDirty||ListView_GetTopIndex(list)!=observedTop||ListView_GetItemCount(list)!=observedCount||now-lastScan>=1000) {
             lastScan=now;scanRows();
           }
-          processQueue();
+          queueDirectReads();processQueue();publishPreparedPage();
         }
       }
     }
@@ -632,7 +696,7 @@ bool hookCommand(int cmd,int) {
     SetExtState(section,"enabled",enabled?"1":"0",true);publishStatus();return true;
   }
   if(cmd==refreshAction.accel.cmd) {
-    stopBuild();clearBitmaps();cache.clear();dirtyRows();lastScan=0;lastError.clear();invalidate();publishStatus();return true;
+    stopBuild();peakReaders.retain({});clearBitmaps();cache.clear();dirtyRows();lastScan=0;lastError.clear();invalidate();publishStatus();return true;
   }
   return false;
 }
@@ -648,9 +712,9 @@ int layoutSetting(const char* key,int fallback,int max) {
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(HINSTANCE,reaper_plugin_info_t* rec) {
   if(!rec) {
     if(host.Register) {
-      detach();saveWaveLayout(true);clearBitmaps();
-      if(bitmapDC){DeleteDC(bitmapDC);bitmapDC=nullptr;}
       host.Register("-timer",reinterpret_cast<void*>(timer));
+      peakReaders.stop();detach();saveWaveLayout(true);clearBitmaps();
+      if(bitmapDC){DeleteDC(bitmapDC);bitmapDC=nullptr;}
       host.Register("-hookcommand",reinterpret_cast<void*>(hookCommand));
       host.Register("-toggleaction",reinterpret_cast<void*>(toggleState));
       host.Register("-gaccel",&toggleAction);host.Register("-gaccel",&refreshAction);
@@ -669,6 +733,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(HINSTANCE,reape
   enabled=std::string(GetExtState(section,"enabled"))!="0";
   waveOrder=layoutSetting("wave_order",-1,65535);
   waveWidth=layoutSetting("wave_width",196,65535);
+  try {peakReaders.start();}catch(const std::exception& e){lastError=e.what();return 0;}
   toggleAction.accel.cmd=WORD(host.Register("command_id",const_cast<char*>("MWT_TOGGLE")));
   toggleAction.desc="Media Explorer: Toggle waveform thumbnails";
   refreshAction.accel.cmd=WORD(host.Register("command_id",const_cast<char*>("MWT_REFRESH")));
