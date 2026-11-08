@@ -8,19 +8,26 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 // PCM_source remains opaque: call only the SDK's C API (MinGW compatible).
 namespace {
 constexpr char section[] = "MediaWaveThumbnails";
 constexpr wchar_t columnTitle[] = L"Waveform";
-constexpr int bins = 192, cacheLimit = 512;
+constexpr char version[] = "0.2.0";
+constexpr int bins = 192;
+constexpr size_t bitmapLimit = 256, bitmapBudget = 16 * 1024 * 1024;
 constexpr UINT_PTR subclassId = 0x4D575431;
 reaper_plugin_info_t host{};
 HWND explorer{}, list{};
-bool enabled = true, busy{};
+bool enabled = true, busy{}, rowsDirty = true;
 int column = -1;
-uint64_t clockTick{}, draws{}, builds{}, pathLookups{}, lastScan{}, lastStatus{};
+uint64_t waveRevision{}, bitmapTick{}, draws{}, builds{}, pathLookups{}, lastScan{}, lastStatus{};
+uint64_t sourceOpens{}, peakReads{}, bitmapBuilds{}, bitmapHits{}, bitmapEvictions{};
+uint64_t dirtySince{}, restoreLatency{};
+int observedTop = -1, observedCount = -1;
 std::string lastError;
 std::wstring currentDirectory;
 gaccel_register_t toggleAction{}, refreshAction{};
@@ -73,10 +80,45 @@ struct Wave {
   int state{}; // 0 queued, 1 ready, -1 unsupported/error
   int attempts{};
   uint64_t retryAfter{};
-  uint64_t used{};
+  uint64_t revision{};
+  float peak{};
 };
+// Peak arrays live for the whole session. Only disposable render surfaces use
+// LRU eviction; losing a surface must never cause another source/peak read.
 std::map<std::wstring,Wave> cache;
 std::map<int,std::wstring> rows;
+using BitmapKey = std::tuple<std::wstring,uint64_t,int,int,COLORREF,COLORREF>;
+struct Raster {
+  HBITMAP handle{};
+  size_t bytes{};
+  uint64_t used{};
+  Raster(HBITMAP h,size_t n,uint64_t tick):handle(h),bytes(n),used(tick){}
+  Raster(const Raster&)=delete;
+  Raster& operator=(const Raster&)=delete;
+  Raster(Raster&& other) noexcept:handle(std::exchange(other.handle,nullptr)),bytes(other.bytes),used(other.used){}
+  ~Raster(){if(handle)DeleteObject(handle);}
+};
+std::map<BitmapKey,Raster> bitmaps;
+size_t bitmapBytes{};
+HDC bitmapDC{};
+
+void clearBitmaps(){bitmaps.clear();bitmapBytes=0;}
+void discardBitmaps(const std::wstring& path) {
+  for(auto it=bitmaps.begin();it!=bitmaps.end();) {
+    if(std::get<0>(it->first)==path){bitmapBytes-=it->second.bytes;it=bitmaps.erase(it);}
+    else ++it;
+  }
+}
+void reserveBitmap(size_t bytes) {
+  while(!bitmaps.empty()&&(bitmaps.size()>=bitmapLimit||bitmapBytes+bytes>bitmapBudget)) {
+    auto victim=std::min_element(bitmaps.begin(),bitmaps.end(),[](const auto& a,const auto& b){return a.second.used<b.second.used;});
+    bitmapBytes-=victim->second.bytes;bitmaps.erase(victim);++bitmapEvictions;
+  }
+}
+void dirtyRows() {
+  rows.clear();rowsDirty=true;
+  if(!dirtySince)dirtySince=GetTickCount64();
+}
 PCM_source* activeSource{};
 std::wstring activePath;
 bool building{};
@@ -126,6 +168,7 @@ void finishWave() {
   int channels=SourceChannels(activeSource);
   if(qn||!std::isfinite(length)||length<=0||channels<=0||channels>128) {wave.state=-1;stopBuild();return;}
   std::vector<double> buffer(size_t(bins)*channels*2,0.0);
+  ++peakReads;
   int result=GetPeaks(activeSource,bins/length,0,channels,bins,0,buffer.data());
   int count=result&0xfffff;
   if(count>0&&count<=bins) {
@@ -138,6 +181,7 @@ void finishWave() {
       }
       wave.high[x]=float(std::clamp(hi,-1.0,1.0));
       wave.low[x]=float(std::clamp(lo,-1.0,1.0));
+      wave.peak=std::max({wave.peak,std::abs(wave.high[x]),std::abs(wave.low[x])});
     }
     wave.state=1;++builds;
   }else {
@@ -148,26 +192,80 @@ void finishWave() {
   }
   stopBuild();invalidate();
 }
-void processQueue() {
+bool processNext() {
   if(activeSource) {
     if(GetTickCount64()-buildStarted>30000) {
-      cache[activePath].state=-1;lastError="Peak build exceeded 30 seconds";stopBuild();return;
+      cache[activePath].state=-1;lastError="Peak build exceeded 30 seconds";stopBuild();return true;
     }
-    if(building && BuildPeaks(activeSource,1)!=0)return;
+    if(building && BuildPeaks(activeSource,1)!=0)return false;
     if(building){BuildPeaks(activeSource,2);building=false;}
-    finishWave();return;
+    finishWave();return true;
   }
   for(auto& [row,path]:rows) {
     auto it=cache.find(path);
     if(it==cache.end()||it->second.state!=0||it->second.retryAfter>GetTickCount64())continue;
-    activePath=path;activeSource=CreateSource(utf8(path).c_str(),true);
-    if(!activeSource){it->second.state=-1;activePath.clear();return;}
+    activePath=path;++sourceOpens;activeSource=CreateSource(utf8(path).c_str(),true);
+    if(!activeSource){it->second.state=-1;activePath.clear();return true;}
     bool qn=false;double length=SourceLength(activeSource,&qn);
-    if(qn||length<=0||SourceChannels(activeSource)<=0){it->second.state=-1;stopBuild();return;}
+    if(qn||length<=0||SourceChannels(activeSource)<=0){it->second.state=-1;stopBuild();return true;}
     buildStarted=GetTickCount64();building=BuildPeaks(activeSource,0)!=0;
     if(!building)finishWave();
-    return;
+    return !building;
   }
+  return false;
+}
+void processQueue() {
+  // Cache hits are already restored as one row map by scanRows(). For misses,
+  // batch inexpensive existing-peak reads, yielding after 4 ms or 32 sources.
+  auto started=GetTickCount64();
+  for(int n=0;n<32;++n) {
+    if(!processNext()||GetTickCount64()-started>=4)break;
+  }
+}
+void drawEnvelope(HDC dc,const RECT& r,const Wave& wave,COLORREF color) {
+  HPEN pen=CreatePen(PS_SOLID,1,color);
+  if(!pen)return;
+  HGDIOBJ old=SelectObject(dc,pen);
+  int mid=(r.top+r.bottom)/2;
+  double scale=std::max<int>(1,(r.bottom-r.top)/2)/std::max(0.01f,wave.peak);
+  for(int x=r.left;x<r.right;++x) {
+    int bin=std::clamp<int>((x-r.left)*bins/std::max<int>(1,r.right-r.left),0,bins-1);
+    int top=mid-int(std::round(wave.high[bin]*scale));
+    int bottom=mid-int(std::round(wave.low[bin]*scale));
+    MoveToEx(dc,x,std::clamp<int>(top,r.top,r.bottom-1),nullptr);
+    LineTo(dc,x,std::clamp<int>(std::max(top+1,bottom),r.top+1,r.bottom));
+  }
+  SelectObject(dc,old);DeleteObject(pen);
+}
+bool blitWave(HDC target,const RECT& r,const std::wstring& path,const Wave& wave,COLORREF fg,COLORREF bg) {
+  int width=r.right-r.left,height=r.bottom-r.top;
+  size_t bytes=size_t(width)*height*4;
+  if(bytes>bitmapBudget)return false;
+  if(!bitmapDC)bitmapDC=CreateCompatibleDC(target);
+  if(!bitmapDC)return false;
+  BitmapKey key{path,wave.revision,width,height,fg,bg};
+  auto it=bitmaps.find(key);
+  bool hit=it!=bitmaps.end();
+  if(!hit) {
+    Raster raster(CreateCompatibleBitmap(target,width,height),bytes,++bitmapTick);
+    if(!raster.handle)return false;
+    HGDIOBJ old=SelectObject(bitmapDC,raster.handle);
+    RECT bounds{0,0,width,height};
+    HBRUSH brush=CreateSolidBrush(bg);
+    if(!brush){SelectObject(bitmapDC,old);return false;}
+    FillRect(bitmapDC,&bounds,brush);DeleteObject(brush);
+    drawEnvelope(bitmapDC,bounds,wave,fg);
+    SelectObject(bitmapDC,old);
+    reserveBitmap(bytes);
+    it=bitmaps.try_emplace(std::move(key),std::move(raster)).first;
+    bitmapBytes+=bytes;++bitmapBuilds;
+  }
+  it->second.used=++bitmapTick;
+  HGDIOBJ old=SelectObject(bitmapDC,it->second.handle);
+  bool copied=BitBlt(target,r.left,r.top,width,height,bitmapDC,0,0,SRCCOPY)!=FALSE;
+  SelectObject(bitmapDC,old);
+  if(copied&&hit)++bitmapHits;
+  return copied;
 }
 void paintWave(NMLVCUSTOMDRAW* n) {
   int row=int(n->nmcd.dwItemSpec);RECT r{};
@@ -184,24 +282,15 @@ void paintWave(NMLVCUSTOMDRAW* n) {
   r.left+=6;r.right-=6;r.top+=3;r.bottom-=3;
   if(r.right<=r.left||r.bottom<=r.top)return;
   COLORREF color=selected?GetSysColor(COLOR_HIGHLIGHTTEXT):RGB(55,166,152);
-  HPEN pen=CreatePen(PS_SOLID,1,color);HGDIOBJ old=SelectObject(n->nmcd.hdc,pen);
-  int mid=(r.top+r.bottom)/2;
-  float peak=0;
-  for(int x=0;x<bins;++x)peak=std::max({peak,std::abs(wave.high[x]),std::abs(wave.low[x])});
-  double scale=std::max<int>(1,(r.bottom-r.top)/2)/std::max(0.01f,peak);
   if(wave.state==1) {
-    for(int x=r.left;x<r.right;++x) {
-      int bin=std::clamp<int>((x-r.left)*bins/std::max<int>(1,r.right-r.left),0,bins-1);
-      int top=mid-int(std::round(wave.high[bin]*scale));
-      int bottom=mid-int(std::round(wave.low[bin]*scale));
-      MoveToEx(n->nmcd.hdc,x,std::clamp<int>(top,r.top,r.bottom-1),nullptr);
-      LineTo(n->nmcd.hdc,x,std::clamp<int>(std::max(top+1,bottom),r.top+1,r.bottom));
-    }
+    if(!blitWave(n->nmcd.hdc,r,rowIt->second,wave,color,bg))drawEnvelope(n->nmcd.hdc,r,wave,color);
     ++draws;
   }else if(wave.state==0) {
+    HPEN pen=CreatePen(PS_SOLID,1,color);HGDIOBJ old=SelectObject(n->nmcd.hdc,pen);
+    int mid=(r.top+r.bottom)/2;
     MoveToEx(n->nmcd.hdc,r.left,mid,nullptr);LineTo(n->nmcd.hdc,r.right,mid);
+    SelectObject(n->nmcd.hdc,old);DeleteObject(pen);
   }
-  SelectObject(n->nmcd.hdc,old);DeleteObject(pen);
 }
 bool ownsColumn() {
   if(!IsWindow(list)||column<0)return false;
@@ -227,12 +316,13 @@ LRESULT CALLBACK parentProc(HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR
     }
     if(hdr->code==LVN_COLUMNCLICK) {
       if(reinterpret_cast<NMLISTVIEW*>(lp)->iSubItem==column)return 0;
-      rows.clear();lastScan=0;
+      dirtyRows();
     }
     if(hdr->code==NM_CUSTOMDRAW && column>=0) {
       auto n=reinterpret_cast<NMLVCUSTOMDRAW*>(lp);
       if(n->nmcd.dwDrawStage==(CDDS_ITEMPREPAINT|CDDS_SUBITEM) && n->iSubItem==column) {
-        paintWave(n);return CDRF_SKIPDEFAULT;
+        try {paintWave(n);}catch(const std::exception& e){lastError=e.what();}
+        return CDRF_SKIPDEFAULT;
       }
       LRESULT result=DefSubclassProc(w,m,wp,lp);
       if(n->nmcd.dwDrawStage==CDDS_PREPAINT)result|=CDRF_NOTIFYITEMDRAW;
@@ -245,13 +335,17 @@ LRESULT CALLBACK parentProc(HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR
 }
 LRESULT CALLBACK listProc(HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR) {
   if(m==LVM_SETITEMCOUNT||m==LVM_DELETEALLITEMS||m==LVM_SORTITEMS||m==LVM_SORTITEMSEX) {
-    rows.clear();lastScan=0;
+    dirtyRows();
+  }
+  if(m==WM_VSCROLL||m==WM_MOUSEWHEEL||m==LVM_ENSUREVISIBLE||m==WM_KEYDOWN) {
+    rowsDirty=true;
+    if(!dirtySince)dirtySince=GetTickCount64();
   }
   if(m==WM_NCDESTROY)RemoveWindowSubclass(w,listProc,subclassId);
   return DefSubclassProc(w,m,wp,lp);
 }
 void detach() {
-  stopBuild();rows.clear();
+  stopBuild();dirtyRows();
   if(ownsColumn())ListView_DeleteColumn(list,column);
   if(IsWindow(list))RemoveWindowSubclass(list,listProc,subclassId);
   if(IsWindow(explorer)) {
@@ -288,9 +382,10 @@ bool attach() {
     order.insert(order.begin()+std::min(size_t(1),order.size()),column);
     ListView_SetColumnOrderArray(list,column+1,order.data());
   }
-  lastScan=0;return true;
+  observedTop=observedCount=-1;rowsDirty=true;lastScan=0;return true;
 }
 void scanRows() {
+  rowsDirty=false;
   auto directory=windowText(GetDlgItem(explorer,1002));
   if(directory!=currentDirectory)rows.clear();
   currentDirectory=std::move(directory);
@@ -339,37 +434,33 @@ void scanRows() {
     auto [entry,inserted]=cache.try_emplace(path);
     if(inserted||!(entry->second.stamp==fileStamp)) {
       if(path==activePath)stopBuild();
-      entry->second=Wave{};entry->second.stamp=fileStamp;
+      discardBitmaps(path);
+      entry->second=Wave{};entry->second.stamp=fileStamp;entry->second.revision=++waveRevision;
     }
-    entry->second.used=++clockTick;
     ++it;
   }
   if(rows!=next){rows=std::move(next);invalidate();}
   if(activeSource && std::none_of(rows.begin(),rows.end(),[](const auto& row){return row.second==activePath;}))stopBuild();
-  while(cache.size()>cacheLimit) {
-    auto victim=cache.end();
-    for(auto it=cache.begin();it!=cache.end();++it) {
-      if(it->first==activePath)continue;
-      if(victim==cache.end()||it->second.used<victim->second.used)victim=it;
-    }
-    if(victim==cache.end())break;
-    cache.erase(victim);
-  }
+  observedTop=first;observedCount=ListView_GetItemCount(list);
+  if(dirtySince){restoreLatency=GetTickCount64()-dirtySince;dirtySince=0;}
 }
 void publishStatus() {
   std::ostringstream s;
   int ready=0;for(const auto& [r,p]:rows){auto it=cache.find(p);if(it!=cache.end()&&it->second.state==1)++ready;}
-  s<<"{\"version\":\"0.1.0\",\"enabled\":"<<(enabled?"true":"false")
+  s<<"{\"version\":"<<json(version)<<",\"enabled\":"<<(enabled?"true":"false")
    <<",\"attached\":"<<(ownsColumn()?"true":"false")<<",\"column\":"<<column
    <<",\"visible_files\":"<<rows.size()<<",\"ready\":"<<ready<<",\"cache\":"<<cache.size()
    <<",\"builds\":"<<builds<<",\"draws\":"<<draws<<",\"path_lookups\":"<<pathLookups
+   <<",\"source_opens\":"<<sourceOpens<<",\"peak_reads\":"<<peakReads
+   <<",\"bitmap_builds\":"<<bitmapBuilds<<",\"bitmap_hits\":"<<bitmapHits
+   <<",\"bitmap_cache\":"<<bitmaps.size()<<",\"bitmap_bytes\":"<<bitmapBytes<<",\"bitmap_evictions\":"<<bitmapEvictions
+   <<",\"peak_array_bytes\":"<<cache.size()*bins*2*sizeof(float)<<",\"restore_latency_ms\":"<<restoreLatency
    <<",\"directory\":"<<json(utf8(currentDirectory))<<",\"error\":"<<json(lastError)<<",\"files\":[";
   bool first=true;
   for(const auto& [r,p]:rows) {
     if(!first)s<<',';
     first=false;const auto& wave=cache.at(p);
-    float peak=0;for(int x=0;x<bins;++x)peak=std::max({peak,std::abs(wave.high[x]),std::abs(wave.low[x])});
-    s<<"{\"row\":"<<r<<",\"path\":"<<json(utf8(p))<<",\"state\":"<<wave.state<<",\"peak\":"<<peak<<'}';
+    s<<"{\"row\":"<<r<<",\"path\":"<<json(utf8(p))<<",\"state\":"<<wave.state<<",\"peak\":"<<wave.peak<<'}';
   }
   s<<"]}";SetExtState(section,"status",s.str().c_str(),false);
 }
@@ -384,7 +475,9 @@ void timer() {
       if(list) {
         if(!ownsColumn()){detach();attach();}
         if(IsWindowVisible(list)) {
-          if(now-lastScan>=200){lastScan=now;scanRows();}
+          if(rowsDirty||ListView_GetTopIndex(list)!=observedTop||ListView_GetItemCount(list)!=observedCount||now-lastScan>=1000) {
+            lastScan=now;scanRows();
+          }
           processQueue();
         }
       }
@@ -399,7 +492,7 @@ bool hookCommand(int cmd,int) {
     SetExtState(section,"enabled",enabled?"1":"0",true);publishStatus();return true;
   }
   if(cmd==refreshAction.accel.cmd) {
-    stopBuild();cache.clear();rows.clear();lastScan=0;lastError.clear();invalidate();publishStatus();return true;
+    stopBuild();clearBitmaps();cache.clear();dirtyRows();lastScan=0;lastError.clear();invalidate();publishStatus();return true;
   }
   return false;
 }
@@ -409,7 +502,9 @@ template<typename T> bool load(T& fn,const char* name){fn=reinterpret_cast<T>(ho
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(HINSTANCE,reaper_plugin_info_t* rec) {
   if(!rec) {
     if(host.Register) {
-      detach();host.Register("-timer",reinterpret_cast<void*>(timer));
+      detach();clearBitmaps();
+      if(bitmapDC){DeleteDC(bitmapDC);bitmapDC=nullptr;}
+      host.Register("-timer",reinterpret_cast<void*>(timer));
       host.Register("-hookcommand",reinterpret_cast<void*>(hookCommand));
       host.Register("-toggleaction",reinterpret_cast<void*>(toggleState));
       host.Register("-gaccel",&toggleAction);host.Register("-gaccel",&refreshAction);
