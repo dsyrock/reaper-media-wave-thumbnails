@@ -22,7 +22,7 @@ for i = 1, 640 do write(folder .. '/' .. string.format('%04d.wav', i), bytes) en
 local function num(s, key) return tonumber(s:match('"' .. key .. '":([%d%.]+)')) or 0 end
 local function status()
   local s = reaper.GetExtState('MediaWaveThumbnails', 'status')
-  assert(s:find('"version":"0.2.0"', 1, true), 'Wrong test DLL: ' .. s)
+  assert(s:match('"version":"0%.2%.%d+"'), 'Wrong test DLL: ' .. s)
   assert(s:find('"error":""', 1, true), s)
   return s
 end

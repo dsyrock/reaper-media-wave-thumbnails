@@ -16,7 +16,7 @@
 namespace {
 constexpr char section[] = "MediaWaveThumbnails";
 constexpr wchar_t columnTitle[] = L"Waveform";
-constexpr char version[] = "0.2.0";
+constexpr char version[] = "0.2.1";
 constexpr int bins = 192;
 constexpr size_t bitmapLimit = 256, bitmapBudget = 16 * 1024 * 1024;
 constexpr UINT_PTR subclassId = 0x4D575431;
@@ -24,6 +24,10 @@ reaper_plugin_info_t host{};
 HWND explorer{}, list{};
 bool enabled = true, busy{}, rowsDirty = true;
 int column = -1;
+int waveWidth = 196, columnMenuDepth{};
+bool changingColumns{};
+char columnCookie{};
+uint64_t columnsReadyAfter{};
 uint64_t waveRevision{}, bitmapTick{}, draws{}, builds{}, pathLookups{}, lastScan{}, lastStatus{};
 uint64_t sourceOpens{}, peakReads{}, bitmapBuilds{}, bitmapHits{}, bitmapEvictions{};
 uint64_t dirtySince{}, restoreLatency{};
@@ -293,11 +297,61 @@ void paintWave(NMLVCUSTOMDRAW* n) {
   }
 }
 bool ownsColumn() {
-  if(!IsWindow(list)||column<0)return false;
-  wchar_t title[64]{};LVCOLUMNW c{};c.mask=LVCF_TEXT;c.pszText=title;c.cchTextMax=64;
-  return ListView_GetColumn(list,column,&c)&&std::wstring(title)==columnTitle;
+  if(!IsWindow(list))return false;
+  HWND header=ListView_GetHeader(list);
+  auto isOurs=[&](int i) {
+    HDITEMW item{};item.mask=HDI_LPARAM;
+    return i>=0&&Header_GetItem(header,i,&item)&&item.lParam==reinterpret_cast<LPARAM>(&columnCookie);
+  };
+  if(isOurs(column))return true;
+  for(int i=0,n=Header_GetItemCount(header);i<n;++i)if(isOurs(i)){column=i;return true;}
+  column=-1;return false;
 }
+void removeWaveColumn() {
+  if(!ownsColumn())return;
+  waveWidth=ListView_GetColumnWidth(list,column);
+  int own=column;column=-1;
+  bool prior=std::exchange(changingColumns,true);
+  ListView_DeleteColumn(list,own);
+  changingColumns=prior;
+}
+bool addWaveColumn() {
+  if(ownsColumn())return true;
+  int count=Header_GetItemCount(ListView_GetHeader(list));
+  if(count<=0)return false;
+  // Capture the ORIGINAL order before extending the native schema. In
+  // particular, Mark/Fav can precede File and must retain their positions.
+  std::vector<int> order(count);
+  if(!ListView_GetColumnOrderArray(list,count,order.data()))return false;
+  auto file=std::find(order.begin(),order.end(),0);
+  order.insert(file==order.end()?order.end():file+1,count);
+  bool prior=std::exchange(changingColumns,true);
+  column=count;
+  LVCOLUMNW c{};c.mask=LVCF_TEXT|LVCF_WIDTH|LVCF_SUBITEM|LVCF_ORDER;
+  c.pszText=const_cast<wchar_t*>(columnTitle);c.cx=waveWidth;c.iSubItem=column;c.iOrder=count;
+  if(ListView_InsertColumn(list,column,&c)<0){column=-1;changingColumns=prior;return false;}
+  HDITEMW tag{};tag.mask=HDI_LPARAM;tag.lParam=reinterpret_cast<LPARAM>(&columnCookie);
+  Header_SetItem(ListView_GetHeader(list),column,&tag);
+  ListView_SetColumnOrderArray(list,int(order.size()),order.data());
+  changingColumns=prior;
+  dirtyRows();return true;
+}
+void detach();
 LRESULT CALLBACK parentProc(HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR) {
+  if(m==WM_CLOSE||m==WM_DESTROY) {
+    // Native shutdown saves column preferences. It must see only native
+    // columns, rather than our extra logical index/order positions.
+    detach();return DefSubclassProc(w,m,wp,lp);
+  }
+  if(m==WM_COMMAND) {
+    int cmd=LOWORD(wp);
+    if(cmd==42172||(cmd>=42338&&cmd<=42347)||cmd==42359) {
+      removeWaveColumn();++columnMenuDepth;
+      LRESULT result=DefSubclassProc(w,m,wp,lp);
+      --columnMenuDepth;columnsReadyAfter=GetTickCount64()+100;
+      return result;
+    }
+  }
   if(m==WM_NOTIFY && lp && reinterpret_cast<NMHDR*>(lp)->hwndFrom==list) {
     auto hdr=reinterpret_cast<NMHDR*>(lp);
     if(hdr->code==LVN_GETDISPINFOW) {
@@ -334,6 +388,23 @@ LRESULT CALLBACK parentProc(HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR
   return DefSubclassProc(w,m,wp,lp);
 }
 LRESULT CALLBACK listProc(HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR) {
+  if(!changingColumns) {
+    bool order=m==LVM_SETCOLUMNORDERARRAY;
+    bool structural=m==LVM_INSERTCOLUMNA||m==LVM_INSERTCOLUMNW||m==LVM_DELETECOLUMN;
+    if(structural||(order&&int(wp)!=Header_GetItemCount(ListView_GetHeader(w)))) {
+      bool deletingOurs=m==LVM_DELETECOLUMN&&ownsColumn()&&int(wp)==column;
+      removeWaveColumn();columnsReadyAfter=GetTickCount64()+100;
+      dirtyRows();
+      if(deletingOurs)return TRUE;
+      return DefSubclassProc(w,m,wp,lp);
+    }
+    if(m==WM_CONTEXTMENU&&reinterpret_cast<HWND>(wp)==ListView_GetHeader(w)) {
+      removeWaveColumn();++columnMenuDepth;
+      LRESULT result=DefSubclassProc(w,m,wp,lp);
+      --columnMenuDepth;columnsReadyAfter=GetTickCount64()+100;
+      return result;
+    }
+  }
   if(m==LVM_SETITEMCOUNT||m==LVM_DELETEALLITEMS||m==LVM_SORTITEMS||m==LVM_SORTITEMSEX) {
     dirtyRows();
   }
@@ -346,7 +417,7 @@ LRESULT CALLBACK listProc(HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR) 
 }
 void detach() {
   stopBuild();dirtyRows();
-  if(ownsColumn())ListView_DeleteColumn(list,column);
+  removeWaveColumn();
   if(IsWindow(list))RemoveWindowSubclass(list,listProc,subclassId);
   if(IsWindow(explorer)) {
     RemoveWindowSubclass(explorer,parentProc,subclassId);
@@ -371,17 +442,8 @@ bool attach() {
   if(!list)return false;
   if(!SetWindowSubclass(explorer,parentProc,subclassId,0)){explorer=list=nullptr;return false;}
   if(!SetWindowSubclass(list,listProc,subclassId,0)){detach();return false;}
-  column=Header_GetItemCount(ListView_GetHeader(list));
-  LVCOLUMNW c{};c.mask=LVCF_TEXT|LVCF_WIDTH|LVCF_SUBITEM;c.pszText=const_cast<wchar_t*>(columnTitle);
-  c.cx=196;c.iSubItem=column;
-  if(ListView_InsertColumn(list,column,&c)<0){detach();return false;}
-  // Display second, retain every existing logical subitem index.
-  std::vector<int> order(column+1);
-  if(ListView_GetColumnOrderArray(list,column+1,order.data())) {
-    order.erase(std::remove(order.begin(),order.end(),column),order.end());
-    order.insert(order.begin()+std::min(size_t(1),order.size()),column);
-    ListView_SetColumnOrderArray(list,column+1,order.data());
-  }
+  // Let native startup finish applying saved widths and order first.
+  columnsReadyAfter=GetTickCount64()+100;
   observedTop=observedCount=-1;rowsDirty=true;lastScan=0;return true;
 }
 void scanRows() {
@@ -473,8 +535,9 @@ void timer() {
       if(list&&!IsWindow(list))detach();
       if(!list && now-lastScan>=500){lastScan=now;attach();}
       if(list) {
-        if(!ownsColumn()){detach();attach();}
-        if(IsWindowVisible(list)) {
+        bool haveColumn=ownsColumn();
+        if(!haveColumn&&!columnMenuDepth&&now>=columnsReadyAfter)haveColumn=addWaveColumn();
+        if(haveColumn&&IsWindowVisible(list)) {
           if(rowsDirty||ListView_GetTopIndex(list)!=observedTop||ListView_GetItemCount(list)!=observedCount||now-lastScan>=1000) {
             lastScan=now;scanRows();
           }

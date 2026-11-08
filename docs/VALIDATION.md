@@ -1,8 +1,18 @@
 # 实测记录
 
-测试日期：2026-11-08（Asia/Shanghai）。当前版本：0.2.0；REAPER 7.84/x64。
+测试日期：2026-11-08（Asia/Shanghai）。当前版本：0.2.1；REAPER 7.84/x64。
 
 按 reaper-test 技能使用 `F:\AGENT\SKILLS\reaper-test\scripts\socket_client.py`，每次握手核对独立资源目录。日常使用的 `C:\REAPER` 未用于本轮测试。
+
+## 0.2.1 Temporary Mark / 原生列布局回归
+
+实测 DLL SHA-256：`7b06f9e5e57c272925e3c76ef1294f37ce0bb65b85ab619f2c0ade5caac53c54`。
+
+- 在 0.2.0 下复现：补丁启用时，对原生 25 列应用顺序数组失败；它的控件此时已有 26 列。此类失败会阻止原生列布局恢复。
+- `tests/columns.lua`：设置 Mark 最前、Fav 第二、Mark 宽度 56，断言全部原生列标题、相对顺序、宽度及原有零宽隐藏列保持不变；Waveform 跟在实际 File 列之后。原生 25 列布局应用成功；原生列删除/重建后仍完整恢复；重复开关不丢列、不重复附加。
+- `tests/columns-startup.lua`：在独立测试配置中保存 Mark 最前、宽度 56 的布局，正常退出并重启后仍正确恢复。
+- 重跑 `tests/regression.lua`，多行绘制、Unicode、单双声道、静音、坏文件、同名文件与缓存复用均通过。
+- 启动测试的 INI 准备首次将顺序数组写反；修正为 `colN_order = 第 N 个显示位置的逻辑列号` 后重跑通过。
 
 ## 0.2.0 缓存优化回归
 
