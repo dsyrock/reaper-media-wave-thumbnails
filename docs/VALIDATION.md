@@ -1,8 +1,23 @@
 # 实测记录
 
-测试日期：2026-11-08（Asia/Shanghai）。当前版本：0.2.1；REAPER 7.84/x64。
+测试日期：2026-11-08（Asia/Shanghai）。当前版本：0.2.2；REAPER 7.84/x64。
 
 按 reaper-test 技能使用 `F:\AGENT\SKILLS\reaper-test\scripts\socket_client.py`，每次握手核对独立资源目录。日常使用的 `C:\REAPER` 未用于本轮测试。
+
+## 0.2.2 自有列布局与重启读取回归
+
+最终候选 DLL SHA-256：`4a3a8ae7607047034bb1f450867b9fb0cfb58e0c614751a423212b120c47aa13`。
+
+修复前 0.2.1 的布局测试只覆盖了原生列，遗漏了 Waveform 自身的位置与宽度；其插入位置在启动时仍被固定放回 File 后。0.2.2 为自有列保存独立设置。
+
+- `tests/restart-layout-save.lua`：把 Waveform 移到显示第 1 列，宽度设置为 317，确认 ExtState 写入 `wave_order=0`、`wave_width=317`，同时记录完整原生列布局。
+- 正常退出实际测试进程，确认结束后启动同一个 REAPER；`tests/restart-layout-check.lua` 断言 Waveform 仍为第 1 列、宽度 317；其余全部原生列顺序和宽度与退出前一致。
+- 同一重启测试中的 28 个可见音频全部直接读取到现有峰值：`fast_peak_hits=28`，`peak_build_probes=0`、`peak_build_starts=0`。此结论是未进入构建流程，不是没有读取文件或没有重绘位图。
+- `tests/peak-refresh.lua`：同大小、不同修改时间的 1 秒 WAV 从峰值约 0.8 改为约 0.2，断言波形及时更新且只重新打开变化的源文件；未变化的 Keep.wav 继续使用已有数组。
+- 直接读峰值的初版在文件修改后读到旧 `.reapeaks`，仅调用 BuildPeaks 或清理内存引用也未更新；修正为对已确认变化/过期的对应派生峰值文件执行失效处理，再构建，原故障回归通过。无法使过期文件失效时返回明确错误并留空，不显示旧波形。
+- 最终候选重跑 `tests/columns.lua`、`tests/regression.lua`、`tests/database.lua`、`tests/search.lua`，全部通过；先前的冷缓存测试 `tests/cold-cache.lua` 也在本轮读取路径改动后通过。
+
+没有增加扩展自建的峰值或位图磁盘缓存。布局设置写入 REAPER ExtState；生产环境新增的峰值文件仍由 REAPER 自身生成。
 
 ## 0.2.1 Temporary Mark / 原生列布局回归
 

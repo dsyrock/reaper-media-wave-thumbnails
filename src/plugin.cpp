@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <sstream>
@@ -16,7 +17,7 @@
 namespace {
 constexpr char section[] = "MediaWaveThumbnails";
 constexpr wchar_t columnTitle[] = L"Waveform";
-constexpr char version[] = "0.2.1";
+constexpr char version[] = "0.2.2";
 constexpr int bins = 192;
 constexpr size_t bitmapLimit = 256, bitmapBudget = 16 * 1024 * 1024;
 constexpr UINT_PTR subclassId = 0x4D575431;
@@ -25,11 +26,16 @@ HWND explorer{}, list{};
 bool enabled = true, busy{}, rowsDirty = true;
 int column = -1;
 int waveWidth = 196, columnMenuDepth{};
+int waveOrder = -1;
+bool layoutPending{};
+uint64_t layoutChangedAt{};
 bool changingColumns{};
 char columnCookie{};
 uint64_t columnsReadyAfter{};
 uint64_t waveRevision{}, bitmapTick{}, draws{}, builds{}, pathLookups{}, lastScan{}, lastStatus{};
 uint64_t sourceOpens{}, peakReads{}, bitmapBuilds{}, bitmapHits{}, bitmapEvictions{};
+uint64_t fastPeakHits{}, peakBuildStarts{}, peakBuildProbes{};
+uint64_t peakCacheInvalidations{};
 uint64_t dirtySince{}, restoreLatency{};
 int observedTop = -1, observedCount = -1;
 std::string lastError;
@@ -47,6 +53,8 @@ const char* (*GetExtState)(const char*, const char*);
 void (*SetExtState)(const char*, const char*, const char*, bool);
 int (*GetToggleState)(int, int);
 bool (*IsMediaExtension)(const char*, bool);
+void (*GetPeakFileNameEx)(const char*, char*, int, bool);
+void (*ClearPeakCache)();
 
 std::string utf8(const std::wstring& s) {
   if (s.empty()) return {};
@@ -54,6 +62,13 @@ std::string utf8(const std::wstring& s) {
   std::string out(n,'\0');
   WideCharToMultiByte(CP_UTF8,0,s.data(),int(s.size()),out.data(),n,nullptr,nullptr);
   return out;
+}
+std::wstring wide(const char* text) {
+  int length=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text,-1,nullptr,0);
+  if(length<=0)return {};
+  std::wstring result(length,L'\0');
+  MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text,-1,result.data(),length);
+  result.resize(length-1);return result;
 }
 std::wstring windowText(HWND w) {
   int n=GetWindowTextLengthW(w); std::wstring s(n+1,L'\0');
@@ -86,6 +101,7 @@ struct Wave {
   uint64_t retryAfter{};
   uint64_t revision{};
   float peak{};
+  bool sourceChanged{};
 };
 // Peak arrays live for the whole session. Only disposable render surfaces use
 // LRU eviction; losing a surface must never cause another source/peak read.
@@ -127,6 +143,15 @@ PCM_source* activeSource{};
 std::wstring activePath;
 bool building{};
 uint64_t buildStarted{};
+bool currentPeakFile(const std::wstring& path,const Wave& wave,bool& stale,std::wstring& peakPath) {
+  std::array<char,32768> name{};
+  GetPeakFileNameEx(utf8(path).c_str(),name.data(),int(name.size()),false);
+  peakPath=wide(name.data());
+  Stamp peaks;
+  bool exists=stamp(peakPath,peaks);
+  stale=exists&&peaks.time<wave.stamp.time;
+  return !wave.sourceChanged&&exists&&!stale;
+}
 
 // OWNERDATA list text belongs to REAPER. Ask its existing notification handler
 // for each original cell instead of reading private row pointers.
@@ -164,13 +189,13 @@ void stopBuild() {
   activeSource=nullptr;activePath.clear();building=false;
 }
 void invalidate() {if(IsWindow(list))InvalidateRect(list,nullptr,FALSE);}
-void finishWave() {
+bool readWave(bool retryOnEmpty) {
   auto it=cache.find(activePath);
-  if(it==cache.end()){stopBuild();return;}
+  if(it==cache.end()){stopBuild();return true;}
   auto& wave=it->second;
   bool qn=false;double length=SourceLength(activeSource,&qn);
   int channels=SourceChannels(activeSource);
-  if(qn||!std::isfinite(length)||length<=0||channels<=0||channels>128) {wave.state=-1;stopBuild();return;}
+  if(qn||!std::isfinite(length)||length<=0||channels<=0||channels>128) {wave.state=-1;stopBuild();return true;}
   std::vector<double> buffer(size_t(bins)*channels*2,0.0);
   ++peakReads;
   int result=GetPeaks(activeSource,bins/length,0,channels,bins,0,buffer.data());
@@ -189,12 +214,13 @@ void finishWave() {
     }
     wave.state=1;++builds;
   }else {
+    if(!retryOnEmpty)return false;
     // A simultaneous Media Explorer preview may still be publishing its peak
     // cache. Retry transient empty reads before treating the source as missing.
     wave.state=++wave.attempts>=5?-1:0;
     wave.retryAfter=GetTickCount64()+500;
   }
-  stopBuild();invalidate();
+  stopBuild();invalidate();return true;
 }
 bool processNext() {
   if(activeSource) {
@@ -203,27 +229,54 @@ bool processNext() {
     }
     if(building && BuildPeaks(activeSource,1)!=0)return false;
     if(building){BuildPeaks(activeSource,2);building=false;}
-    finishWave();return true;
+    readWave(true);return true;
   }
   for(auto& [row,path]:rows) {
     auto it=cache.find(path);
     if(it==cache.end()||it->second.state!=0||it->second.retryAfter>GetTickCount64())continue;
+    bool stale=false;
+    std::wstring peakPath;
+    bool haveCurrentPeaks=currentPeakFile(path,it->second,stale,peakPath);
+    // REAPER may retain a peak object even after its source file changed.
+    // Drop those stale global references BEFORE creating the new source.
+    if(it->second.sourceChanged||stale) {
+      ClearPeakCache();++peakCacheInvalidations;
+      // BuildPeaks(0) can accept a stale peak file. Remove only the derived
+      // .reapeaks file reported by REAPER for this changed source.
+      auto extension=std::filesystem::path(peakPath).extension().wstring();
+      if(_wcsicmp(extension.c_str(),L".reapeaks")==0&&peakPath!=path&&!DeleteFileW(peakPath.c_str())) {
+        DWORD error=GetLastError();
+        if(error!=ERROR_FILE_NOT_FOUND&&error!=ERROR_PATH_NOT_FOUND) {
+          it->second.state=-1;
+          lastError="Unable to invalidate stale REAPER peak file (Windows error "+std::to_string(error)+")";
+          return true;
+        }
+      }
+    }
     activePath=path;++sourceOpens;activeSource=CreateSource(utf8(path).c_str(),true);
     if(!activeSource){it->second.state=-1;activePath.clear();return true;}
     bool qn=false;double length=SourceLength(activeSource,&qn);
     if(qn||length<=0||SourceChannels(activeSource)<=0){it->second.state=-1;stopBuild();return true;}
+    // Existing .reapeaks (or already available source peaks) can be read
+    // immediately. Do not send every visited source through the builder first.
+    if(haveCurrentPeaks&&readWave(false)) {
+      if(it->second.state==1)++fastPeakHits;
+      return true;
+    }
+    ++peakBuildProbes;
     buildStarted=GetTickCount64();building=BuildPeaks(activeSource,0)!=0;
-    if(!building)finishWave();
+    if(building)++peakBuildStarts;
+    else readWave(true);
     return !building;
   }
   return false;
 }
 void processQueue() {
   // Cache hits are already restored as one row map by scanRows(). For misses,
-  // batch inexpensive existing-peak reads, yielding after 4 ms or 32 sources.
+  // batch inexpensive existing-peak reads, yielding after 8 ms or 64 steps.
   auto started=GetTickCount64();
-  for(int n=0;n<32;++n) {
-    if(!processNext()||GetTickCount64()-started>=4)break;
+  for(int n=0;n<64;++n) {
+    if(!processNext()||GetTickCount64()-started>=8)break;
   }
 }
 void drawEnvelope(HDC dc,const RECT& r,const Wave& wave,COLORREF color) {
@@ -307,9 +360,27 @@ bool ownsColumn() {
   for(int i=0,n=Header_GetItemCount(header);i<n;++i)if(isOurs(i)){column=i;return true;}
   column=-1;return false;
 }
+void saveWaveLayout(bool force=false) {
+  if(!changingColumns&&ownsColumn()) {
+    HDITEMW item{};item.mask=HDI_ORDER;
+    if(Header_GetItem(ListView_GetHeader(list),column,&item)) {
+      int width=ListView_GetColumnWidth(list,column);
+      if(item.iOrder!=waveOrder||width!=waveWidth) {
+        waveOrder=item.iOrder;waveWidth=width;
+        layoutPending=true;layoutChangedAt=GetTickCount64();
+      }
+    }
+  }
+  if(layoutPending&&(force||GetTickCount64()-layoutChangedAt>=250)) {
+    auto order=std::to_string(waveOrder),width=std::to_string(waveWidth);
+    SetExtState(section,"wave_order",order.c_str(),true);
+    SetExtState(section,"wave_width",width.c_str(),true);
+    layoutPending=false;
+  }
+}
 void removeWaveColumn() {
   if(!ownsColumn())return;
-  waveWidth=ListView_GetColumnWidth(list,column);
+  saveWaveLayout(true);
   int own=column;column=-1;
   bool prior=std::exchange(changingColumns,true);
   ListView_DeleteColumn(list,own);
@@ -324,7 +395,8 @@ bool addWaveColumn() {
   std::vector<int> order(count);
   if(!ListView_GetColumnOrderArray(list,count,order.data()))return false;
   auto file=std::find(order.begin(),order.end(),0);
-  order.insert(file==order.end()?order.end():file+1,count);
+  auto slot=waveOrder>=0?order.begin()+std::min(waveOrder,count):(file==order.end()?order.end():file+1);
+  order.insert(slot,count);
   bool prior=std::exchange(changingColumns,true);
   column=count;
   LVCOLUMNW c{};c.mask=LVCF_TEXT|LVCF_WIDTH|LVCF_SUBITEM|LVCF_ORDER;
@@ -498,6 +570,7 @@ void scanRows() {
       if(path==activePath)stopBuild();
       discardBitmaps(path);
       entry->second=Wave{};entry->second.stamp=fileStamp;entry->second.revision=++waveRevision;
+      entry->second.sourceChanged=!inserted;
     }
     ++it;
   }
@@ -514,6 +587,9 @@ void publishStatus() {
    <<",\"visible_files\":"<<rows.size()<<",\"ready\":"<<ready<<",\"cache\":"<<cache.size()
    <<",\"builds\":"<<builds<<",\"draws\":"<<draws<<",\"path_lookups\":"<<pathLookups
    <<",\"source_opens\":"<<sourceOpens<<",\"peak_reads\":"<<peakReads
+   <<",\"fast_peak_hits\":"<<fastPeakHits<<",\"peak_build_probes\":"<<peakBuildProbes<<",\"peak_build_starts\":"<<peakBuildStarts
+   <<",\"peak_cache_invalidations\":"<<peakCacheInvalidations
+   <<",\"wave_order\":"<<waveOrder<<",\"wave_width\":"<<waveWidth<<",\"layout_pending\":"<<(layoutPending?"true":"false")
    <<",\"bitmap_builds\":"<<bitmapBuilds<<",\"bitmap_hits\":"<<bitmapHits
    <<",\"bitmap_cache\":"<<bitmaps.size()<<",\"bitmap_bytes\":"<<bitmapBytes<<",\"bitmap_evictions\":"<<bitmapEvictions
    <<",\"peak_array_bytes\":"<<cache.size()*bins*2*sizeof(float)<<",\"restore_latency_ms\":"<<restoreLatency
@@ -537,6 +613,7 @@ void timer() {
       if(list) {
         bool haveColumn=ownsColumn();
         if(!haveColumn&&!columnMenuDepth&&now>=columnsReadyAfter)haveColumn=addWaveColumn();
+        if(haveColumn)saveWaveLayout();
         if(haveColumn&&IsWindowVisible(list)) {
           if(rowsDirty||ListView_GetTopIndex(list)!=observedTop||ListView_GetItemCount(list)!=observedCount||now-lastScan>=1000) {
             lastScan=now;scanRows();
@@ -561,11 +638,17 @@ bool hookCommand(int cmd,int) {
 }
 int toggleState(int cmd){return cmd==toggleAction.accel.cmd?int(enabled):-1;}
 template<typename T> bool load(T& fn,const char* name){fn=reinterpret_cast<T>(host.GetFunc(name));return fn!=nullptr;}
+int layoutSetting(const char* key,int fallback,int max) {
+  const char* text=GetExtState(section,key);
+  if(!text||!*text)return fallback;
+  char* end=nullptr;long n=std::strtol(text,&end,10);
+  return *end==0&&n>=0&&n<=max?int(n):fallback;
+}
 }
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(HINSTANCE,reaper_plugin_info_t* rec) {
   if(!rec) {
     if(host.Register) {
-      detach();clearBitmaps();
+      detach();saveWaveLayout(true);clearBitmaps();
       if(bitmapDC){DeleteDC(bitmapDC);bitmapDC=nullptr;}
       host.Register("-timer",reinterpret_cast<void*>(timer));
       host.Register("-hookcommand",reinterpret_cast<void*>(hookCommand));
@@ -581,8 +664,11 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(HINSTANCE,reape
      !load(SourceChannels,"GetMediaSourceNumChannels")||!load(BuildPeaks,"PCM_Source_BuildPeaks")||
      !load(GetPeaks,"PCM_Source_GetPeaks")||!load(GetExtState,"GetExtState")||
      !load(SetExtState,"SetExtState")||!load(GetToggleState,"GetToggleCommandStateEx")||
-     !load(IsMediaExtension,"IsMediaExtension"))return 0;
+     !load(IsMediaExtension,"IsMediaExtension")||!load(GetPeakFileNameEx,"GetPeakFileNameEx")||
+     !load(ClearPeakCache,"ClearPeakCache"))return 0;
   enabled=std::string(GetExtState(section,"enabled"))!="0";
+  waveOrder=layoutSetting("wave_order",-1,65535);
+  waveWidth=layoutSetting("wave_width",196,65535);
   toggleAction.accel.cmd=WORD(host.Register("command_id",const_cast<char*>("MWT_TOGGLE")));
   toggleAction.desc="Media Explorer: Toggle waveform thumbnails";
   refreshAction.accel.cmd=WORD(host.Register("command_id",const_cast<char*>("MWT_REFRESH")));

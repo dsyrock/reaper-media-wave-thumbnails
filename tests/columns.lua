@@ -36,7 +36,8 @@ local function verify(expected)
     if c.title == 'File' then filePosition = i end
     if c.title == 'Waveform' then wavePosition = i end
   end
-  assert(wavePosition == filePosition + 1, 'Waveform inserted before native File column')
+  local saved = tonumber(reaper.GetExtState('MediaWaveThumbnails', 'wave_order'))
+  assert(wavePosition == (saved and saved + 1 or filePosition + 1), 'Saved Waveform position was lost')
   return actual
 end
 local task = coroutine.create(function()
