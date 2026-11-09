@@ -1,6 +1,7 @@
 #include "reaper/reaper_plugin.h"
 #include "peak_reader_pool.hpp"
 #include "wave_geometry.hpp"
+#include "waveform_file.hpp"
 #include "WDL/lice/lice.h" // pixel layout only; graphics functions come from host SWELL
 #include <chrono>
 #include <cstdlib>
@@ -15,13 +16,16 @@
 // empty cell, with alpha, and leave every native notification unchanged.
 namespace {
 constexpr char section[]="MediaWaveThumbnails";
-constexpr char version[]="0.4.0-linux-preview";
+constexpr char version[]="0.4.1-linux-preview";
 constexpr char columnTitle[]="Waveform";
 reaper_plugin_info_t host{};
 HWND explorer{},list{};
 WNDPROC original{};
 bool enabled=true,busy=false,editing=false,statusDirty=true;
+bool columnMismatch=false;
 int column=-1,savedOrder=-1,savedWidth=196,nativeCount=0;
+char columnCookie;
+constexpr char columnProperty[]="MediaWaveThumbnails.linux.column";
 bool layoutPending=false;
 uint64_t layoutAt{},columnsAfter{},nextScan{},pageAt{},revision{},ticket{};
 uint64_t directReads{},sourceOpens{},draws{},rasterTick{},bitmapBuilds{};
@@ -77,9 +81,11 @@ void report(){
   SetExtState(section,"status",s.str().c_str(),false);statusDirty=false;
 }
 bool ownsColumn(){
-  if(column<0||!IsWindow(list)||Header_GetItemCount(ListView_GetHeader(list))!=nativeCount+1)return false;
-  char title[64]{};LVCOLUMN c{};c.mask=LVCF_TEXT;c.pszText=title;c.cchTextMax=sizeof(title);ListView_GetColumn(list,column,&c);
-  return std::strcmp(title,columnTitle)==0;
+  // ListView_GetColumn was only added to SWELL in Dec 2023, after REAPER
+  // 6.83. Its missing-function stub returns no title and caused endless insert.
+  return column>=0&&column==nativeCount&&IsWindow(list)&&
+    GetProp(list,columnProperty)==(HANDLE)&columnCookie&&
+    Header_GetItemCount(ListView_GetHeader(list))==nativeCount+1;
 }
 void saveLayout(bool force=false){
   if(editing||!ownsColumn())return;
@@ -96,12 +102,21 @@ void saveLayout(bool force=false){
 }
 void removeColumn(){
   saveLayout(true);bool prior=editing;editing=true;
-  if(ownsColumn())ListView_DeleteColumn(list,column);
+  if(ownsColumn()){ListView_DeleteColumn(list,column);RemoveProp(list,columnProperty);}
+  // Preserve the marker on an ambiguous live list, so toggling cannot append
+  // a second column. Destroying/reopening that list clears the marker safely.
   column=-1;editing=prior;statusDirty=true;
 }
 bool addColumn(){
   if(editing||!IsWindow(list))return false;
   if(ownsColumn())return true;
+  // If native columns changed unexpectedly, retain our insertion record and
+  // stop. Never append again merely because ownership cannot be confirmed.
+  if(column>=0)return false;
+  if(GetProp(list,columnProperty)==(HANDLE)&columnCookie){
+    error="Waveform column ownership is ambiguous; close and reopen Media Explorer";
+    statusDirty=true;return false;
+  }
   column=-1;int count=Header_GetItemCount(ListView_GetHeader(list));if(count<4)return false;
   std::vector<int> order(count);if(!ListView_GetColumnOrderArray(list,count,order.data()))return false;
   auto file=std::find(order.begin(),order.end(),0);
@@ -109,7 +124,12 @@ bool addColumn(){
   LVCOLUMN c{};c.mask=LVCF_TEXT|LVCF_WIDTH;c.pszText=const_cast<char*>(columnTitle);c.cx=savedWidth;
   editing=true;ListView_InsertColumn(list,count,&c);
   if(Header_GetItemCount(ListView_GetHeader(list))!=count+1){editing=false;error="SWELL could not insert Waveform column";statusDirty=true;return false;}
-  nativeCount=count;column=count;order.insert(order.begin()+slot,column);
+  nativeCount=count;column=count;
+  if(!SetProp(list,columnProperty,(HANDLE)&columnCookie)){
+    ListView_DeleteColumn(list,column);column=-1;editing=false;
+    error="Cannot track Waveform column ownership";columnsAfter=UINT64_MAX;statusDirty=true;return false;
+  }
+  order.insert(order.begin()+slot,column);
   ListView_SetColumnOrderArray(list,int(order.size()),order.data());editing=false;
   saveLayout();InvalidateRect(list,nullptr,FALSE);statusDirty=true;return true;
 }
@@ -183,7 +203,7 @@ std::string resolve(int row,const std::string& dir){
   if(!ext.empty()&&ext[0]=='.')ext.erase(0,1);
   std::vector<std::string> names{name};if(!ext.empty()&&ext.find_first_of("/\\ <>|")==std::string::npos)names.push_back(name+"."+ext);
   for(const auto& value:names){std::filesystem::path path(value);auto suffix=path.extension().string();
-    if(suffix.empty()||!IsMediaExtension(suffix.c_str()+1,false))continue;
+    if(suffix.empty()||!mwt::waveformExtension(suffix)||!IsMediaExtension(suffix.c_str()+1,false))continue;
     if(!path.is_absolute()){std::filesystem::path base(dir);if(!base.is_absolute())continue;path=base/path;}
     mwt::FileStamp stamp;if(mwt::fileStamp(mwt::pathWide(path.string()),stamp))return path.lexically_normal().string();
   }return {};
@@ -192,7 +212,7 @@ void scan(){
   int first=std::max(0,ListView_GetTopIndex(list)),count=ListView_GetItemCount(list);
   int last=std::min(count,first+ListView_GetCountPerPage(list)+2);
   std::map<int,std::string> next;std::vector<int> missing;
-  for(int row=first;row<last;++row){auto path=resolve(row,directory);if(path.empty())missing.push_back(row);else next[row]=path;}
+  for(int row=first;row<last;++row){auto path=resolve(row,directory);if(path.empty()){auto ext=item(row,3);if(mwt::waveformExtension(ext)&&IsMediaExtension(ext.c_str(),false))missing.push_back(row);}else next[row]=path;}
   if(!missing.empty()&&GetToggleState(32063,42026)==0){bool leading=GetToggleState(32063,42134)==1;
     SendMessage(explorer,WM_COMMAND,42026,0);
     try{for(int row:missing){auto path=resolve(row,directory);if(!path.empty())next[row]=path;}}
@@ -248,6 +268,7 @@ void dataTick(){
     }
   }
   if(!source)for(const auto& row:rows){auto& wave=cache.at(row.second);if(wave.state||wave.loading||!wave.tried||now()<wave.retryAt)continue;
+    if(!mwt::waveformPath(row.second)){wave.state=-1;statusDirty=true;continue;}
     auto peak=peakPath(row.second);mwt::FileStamp existing;bool exists=!peak.empty()&&mwt::fileStamp(mwt::pathWide(peak),existing);
     if(wave.changed||(exists&&existing.time<wave.stamp.time)){
       ClearPeakCache();std::filesystem::path p(peak);std::error_code ec;
@@ -270,7 +291,14 @@ void timer(){
     if(enabled){
       if(!IsWindow(explorer)||!IsWindow(list)){if(explorer)detach();EnumWindows(findRoot,0);}
       if(IsWindow(list)&&!editing){
-        if(column>=0&&!ownsColumn()){column=-1;columnsAfter=now()+150;}
+        if(column>=0&&!ownsColumn()){
+          // Known native commands remove us before rebuilding. An unexplained
+          // column-count change is unsafe to repair by guessing an index.
+          error="Native columns changed unexpectedly; restore the layout or close and reopen Media Explorer";
+          columnMismatch=true;
+          statusDirty=true;report();busy=false;return;
+        }
+        if(columnMismatch&&ownsColumn()){columnMismatch=false;error.clear();statusDirty=true;}
         if(column<0&&now()>=columnsAfter)addColumn();
         if(column>=0&&IsWindowVisible(list)){
           saveLayout();auto dir=text(GetDlgItem(explorer,1002));

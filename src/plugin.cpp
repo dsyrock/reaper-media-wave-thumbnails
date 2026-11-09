@@ -3,6 +3,7 @@
 #include "cpu_profile.hpp"
 #include "wave_raster.hpp"
 #include "dc_state.hpp"
+#include "waveform_file.hpp"
 #include <commctrl.h>
 #include <algorithm>
 #include <array>
@@ -21,7 +22,7 @@
 namespace {
 constexpr char section[] = "MediaWaveThumbnails";
 constexpr wchar_t columnTitle[] = L"Waveform";
-constexpr char version[] = "0.3.2";
+constexpr char version[] = "0.3.3";
 constexpr int bins = 192;
 constexpr size_t bitmapLimit = 512, bitmapBudget = 16 * 1024 * 1024;
 constexpr UINT_PTR subclassId = 0x4D575431;
@@ -190,7 +191,7 @@ std::wstring resolveFile(int row,Stamp* found=nullptr) {
   if(!ext.empty()&&ext.find_first_of(L"\\/: *?<>|")==std::wstring::npos)names.push_back(name+L"."+ext);
   for(const auto& n:names) {
     auto suffix=std::filesystem::path(n).extension().wstring();
-    if(suffix.empty()||!IsMediaExtension(utf8(suffix.substr(1)).c_str(),false))continue;
+    if(suffix.empty()||!mwt::waveformExtension(utf8(suffix))||!IsMediaExtension(utf8(suffix.substr(1)).c_str(),false))continue;
     std::filesystem::path candidate(n);
     if(!candidate.is_absolute()) {
       std::filesystem::path directory(currentDirectory);
@@ -263,6 +264,7 @@ bool processNext() {
   for(auto& [row,path]:rows) {
     auto it=cache.find(path);
     if(it==cache.end()||it->second.state!=0||it->second.loading||!it->second.directTried||it->second.retryAfter>GetTickCount64())continue;
+    if(!mwt::waveformPath(utf8(path))){it->second.state=-1;continue;}
     statusDirty=true;
     bool stale=false;
     std::wstring peakPath;
@@ -645,7 +647,7 @@ void scanRows() {
     auto path=resolveFile(row,&value);
     if(path.empty()) {
       auto ext=textAt(row,3);
-      if(!ext.empty()&&IsMediaExtension(utf8(ext).c_str(),false)) {
+      if(mwt::waveformExtension(utf8(ext))&&IsMediaExtension(utf8(ext).c_str(),false)) {
         auto previous=rows.find(row);
         if(previous!=rows.end()) {
           auto name=textAt(row,0),base=std::filesystem::path(previous->second).filename().wstring();

@@ -2,6 +2,7 @@
 #include "reaper/reaper_plugin.h" // staged official SDK + pinned host-provided SWELL
 #include "peak_reader_pool.hpp"
 #include "wave_geometry.hpp"
+#include "waveform_file.hpp"
 #include <chrono>
 #include <filesystem>
 #include <map>
@@ -26,7 +27,7 @@ namespace mac {void draw(NSRect,NSTableView*,NSInteger);void layoutChanged();}
 
 namespace mac {
 constexpr char section[]="MediaWaveThumbnails";
-constexpr char version[]="0.4.0-macos-preview";
+constexpr char version[]="0.4.1-macos-preview";
 reaper_plugin_info_t host{};
 NSHashTable *roots=nil,*tables=nil;
 NSTableColumn* own=nil;
@@ -153,7 +154,7 @@ std::string resolve(int row,const std::string& directory){
   std::string name=item(row,0),ext=item(row,3);if(name.empty()||name=="..")return {};
   if(!ext.empty()&&ext[0]=='.')ext.erase(0,1);
   std::vector<std::string> names{name};if(!ext.empty()&&ext.find_first_of("/\\ <>|")==std::string::npos)names.push_back(name+"."+ext);
-  for(const auto& value:names){std::filesystem::path p(value);std::string suffix=p.extension().string();if(suffix.empty()||!IsMediaExtension(suffix.c_str()+1,false))continue;
+  for(const auto& value:names){std::filesystem::path p(value);std::string suffix=p.extension().string();if(suffix.empty()||!mwt::waveformExtension(suffix)||!IsMediaExtension(suffix.c_str()+1,false))continue;
     if(!p.is_absolute()){std::filesystem::path d(directory);if(!d.is_absolute())continue;p=d/p;}
     mwt::FileStamp stamp;if(mwt::fileStamp(mwt::pathWide(p.string()),stamp))return p.lexically_normal().string();}
   return {};
@@ -162,7 +163,7 @@ void scan(){
   auto* t=table();NSRange range=[t rowsInRect:[t visibleRect]];if(range.location==NSNotFound){rows.clear();return;}
   int first=int(range.location),last=std::min(int([t numberOfRows]),first+int(range.length)+2);
   std::map<NSInteger,std::string> next;std::vector<int> missing;std::string directory=text(GetDlgItem(root(),1002));
-  for(int row=first;row<last;++row){auto path=resolve(row,directory);if(path.empty()){auto ext=item(row,3);if(IsMediaExtension(ext.c_str(),false))missing.push_back(row);}else next[row]=path;}
+  for(int row=first;row<last;++row){auto path=resolve(row,directory);if(path.empty()){auto ext=item(row,3);if(mwt::waveformExtension(ext)&&IsMediaExtension(ext.c_str(),false))missing.push_back(row);}else next[row]=path;}
   if(!missing.empty()&&GetToggleState(32063,42026)==0){bool leading=GetToggleState(32063,42134)==1;
     SendMessage(root(),WM_COMMAND,42026,0);
     try {for(int row:missing){auto path=resolve(row,directory);if(!path.empty())next[row]=path;}}
@@ -195,6 +196,7 @@ void dataTick(){
         if(count>0&&count<=mwt::peakBins){for(int x=0;x<mwt::peakBins;++x){int k=std::min(x,count-1);float hi=0,lo=0;for(int ch=0;ch<channels;++ch){hi=std::max(hi,float(b[k*channels+ch]));lo=std::min(lo,float(b[mwt::peakBins*channels+k*channels+ch]));}wave.data.high[x]=std::clamp(hi,-1.f,1.f);wave.data.low[x]=std::clamp(lo,-1.f,1.f);wave.data.peak=std::max({wave.data.peak,hi,-lo});}wave.state=1;}else wave.state=-1;
       }else wave.state=-1;stopSource();}}
   if(!source)for(const auto& row:rows){auto& wave=cache.at(row.second);if(wave.state||wave.loading||!wave.tried)continue;
+    if(!mwt::waveformPath(row.second)){wave.state=-1;continue;}
     std::array<char,32768> peak{};PeakName(row.second.c_str(),peak.data(),int(peak.size()),false);mwt::FileStamp peakStamp;
     if(wave.changed||(mwt::fileStamp(mwt::pathWide(peak.data()),peakStamp)&&peakStamp.time<wave.stamp.time)){
       ClearPeakCache();std::filesystem::path p(peak.data());std::error_code ec;

@@ -22,15 +22,19 @@ void (*tick)()=nullptr;
 bool (*command)(int,int)=nullptr;
 int (*toggleState)(int)=nullptr;
 int nativeNotifies=0,opens=0,clears=0,allocations=0,blits=0;
+int columnInserts=0,columnQueries=0,forbiddenOpens=0;
+bool legacySwell=false;
+std::map<std::string,HANDLE> properties;
 bool invalidBlit=false,nativeLayoutClean=false;
 struct Column{int index,width;std::string name;};
 std::vector<Column> columns{{0,160,"File"},{1,50,"Size"},{2,50,"Date"},{3,60,"Type"}};
 struct Surface{int width,height;std::vector<uint32_t> pixels;};
 Surface target{900,200,std::vector<uint32_t>(900*200,0xff313131)};
 std::string filename=u8"音频-🌊.wav";
+std::vector<std::string> filenames{filename,"normal.xml","broken.XML","notes.MID"};
 LRESULT nativeProc(HWND,UINT message,WPARAM wp,LPARAM lp){
   if(message==WM_NOTIFY){++nativeNotifies;auto* h=(NMHDR*)lp;
-    if(h->code==LVN_GETDISPINFO){auto* n=(NMLVDISPINFO*)lp;auto value=n->item.iSubItem==0?filename:n->item.iSubItem==3?"wav":"";std::snprintf(n->item.pszText,n->item.cchTextMax,"%s",value.c_str());}
+    if(h->code==LVN_GETDISPINFO){auto* n=(NMLVDISPINFO*)lp;auto name=filenames.at(n->item.iItem);auto value=n->item.iSubItem==0?name:n->item.iSubItem==3?name.substr(name.find_last_of('.')+1):"";std::snprintf(n->item.pszText,n->item.cchTextMax,"%s",value.c_str());}
     if(h->code==NM_CUSTOMDRAW)((NMLVCUSTOMDRAW*)lp)->clrText=RGB(211,212,213);
     return 73;
   }
@@ -47,16 +51,19 @@ bool fVisible(HWND){return true;}
 int fGetClass(HWND,char* out,int size){std::snprintf(out,size,"SysListView32");return 13;}
 LONG_PTR fGetLong(HWND,int){return (LONG_PTR)proc;}
 LONG_PTR fSetLong(HWND,int,LONG_PTR value){auto old=proc;proc=(WNDPROC)value;return (LONG_PTR)old;}
+HANDLE fGetProp(HWND,const char* key){return properties[key];}
+BOOL fSetProp(HWND,const char* key,HANDLE value){properties[key]=value;return TRUE;}
+HANDLE fRemoveProp(HWND,const char* key){auto old=properties[key];properties.erase(key);return old;}
 BOOL fGetText(HWND w,int,char* out,int size){std::snprintf(out,size,"%s",w==pathBox?directory.c_str():"");return TRUE;}
 HWND fHeader(HWND w){return w;}
 int fColumnCount(HWND){return int(columns.size());}
 int fWidth(HWND,int index){auto* c=col(index);return c?c->width:0;}
-void fGetColumn(HWND,int index,LVCOLUMN* c){auto* value=col(index);if(!value)return;if(c->mask&LVCF_TEXT)std::snprintf(c->pszText,c->cchTextMax,"%s",value->name.c_str());}
-void fInsert(HWND,int index,const LVCOLUMN* c){for(auto& v:columns)if(v.index>=index)++v.index;columns.push_back({index,c->cx,c->pszText});}
+void fGetColumn(HWND,int index,LVCOLUMN* c){++columnQueries;auto* value=col(index);if(!value)return;if(c->mask&LVCF_TEXT)std::snprintf(c->pszText,c->cchTextMax,"%s",value->name.c_str());}
+void fInsert(HWND,int index,const LVCOLUMN* c){++columnInserts;for(auto& v:columns)if(v.index>=index)++v.index;columns.push_back({index,c->cx,c->pszText});}
 bool fDelete(HWND,int index){auto i=std::find_if(columns.begin(),columns.end(),[&](const auto& c){return c.index==index;});if(i==columns.end())return false;columns.erase(i);for(auto& c:columns)if(c.index>index)--c.index;return true;}
 BOOL fOrder(HWND,int count,int* out){if(count!=int(columns.size()))return FALSE;for(int i=0;i<count;++i)out[i]=columns[i].index;return TRUE;}
 BOOL fSetOrder(HWND,int count,int* order){std::vector<Column> next;for(int i=0;i<count;++i){auto* c=col(order[i]);if(!c)return FALSE;next.push_back(*c);}columns=std::move(next);return TRUE;}
-int fCount(HWND){return 1;}
+int fCount(HWND){return int(filenames.size());}
 int fTop(HWND){return 0;}
 int fPerPage(HWND){return 8;}
 int fSelected(HWND,int,UINT){return 0;}
@@ -77,9 +84,11 @@ void fBlit(HDC out,int x,int y,int w,int h,HDC in,int sx,int sy,int mode){
 }
 int unexpected(){std::cerr<<"Unexpected SWELL API call\n";std::abort();}
 void* swellApi(const char* name){
+  if(legacySwell&&!std::strcmp(name,"ListView_GetColumn"))return nullptr;
 #define API(n,f) if(!std::strcmp(name,n))return (void*)f
   API("EnumWindows",fEnumWindows);API("EnumChildWindows",fEnumChildren);API("GetDlgItem",fGetDlgItem);
   API("IsWindow",fIsWindow);API("IsWindowVisible",fVisible);API("GetClassName",fGetClass);API("GetWindowLong",fGetLong);API("SetWindowLong",fSetLong);
+  API("GetProp",fGetProp);API("SetProp",fSetProp);API("RemoveProp",fRemoveProp);
   API("GetDlgItemText",fGetText);API("ListView_GetHeader",fHeader);API("Header_GetItemCount",fColumnCount);API("ListView_GetColumnWidth",fWidth);
   API("ListView_GetColumn",fGetColumn);API("ListView_InsertColumn",fInsert);API("ListView_DeleteColumn",fDelete);
   API("ListView_GetColumnOrderArray",fOrder);API("ListView_SetColumnOrderArray",fSetOrder);API("ListView_GetItemCount",fCount);API("ListView_GetTopIndex",fTop);
@@ -91,10 +100,14 @@ void* swellApi(const char* name){
 const char* getState(const char*,const char* key){return settings[key].c_str();}
 void setState(const char*,const char* key,const char* value,bool){settings[key]=value;}
 int getToggle(int,int){return 1;}
-bool media(const char* ext,bool){return !std::strcmp(ext,"wav");}
+bool media(const char* ext,bool){return !strcasecmp(ext,"wav")||!strcasecmp(ext,"xml")||!strcasecmp(ext,"mid");}
 void peakName(const char* path,char* out,int size,bool){std::snprintf(out,size,"%s.reapeaks",path);}
 void clearPeaks(){++clears;}
-PCM_source* createSource(const char*,bool){++opens;return (PCM_source*)1;}
+PCM_source* createSource(const char* path,bool){
+  auto ext=std::filesystem::path(path).extension().string();
+  if(ext!=".wav"){++forbiddenOpens;return nullptr;}
+  ++opens;return (PCM_source*)1;
+}
 void destroySource(PCM_source*){}
 double sourceLength(PCM_source*,bool* qn){*qn=false;return 1;}
 int channels(PCM_source*){return 2;}
@@ -124,12 +137,15 @@ void writeFixture(){
   auto put32=[&](uint32_t n){for(int i=0;i<4;++i)f.put(char(n>>(8*i)));};auto put16=[&](int n){f.put(char(n));f.put(char(n>>8));};
   put32(48000);put32(uint32_t(stamp.time/10000000-11644473600ULL));put32(4096);put32(128);put32(384);
   for(int i=0;i<384;++i){put16(16384);put16(-8192);}
+  {std::ofstream good(directory/"normal.xml");good<<"<?xml version=\"1.0\"?><score-partwise version=\"4.0\"></score-partwise>";}
+  {std::ofstream bad(directory/"broken.XML");bad<<"score-partwise version=\"4.0\"></score-partwise>";}
+  {std::ofstream midi(directory/"notes.MID");midi<<"MThd";}
 }
 void paint(){NMLVCUSTOMDRAW n{};n.nmcd.hdr={list,1001,NM_CUSTOMDRAW};n.nmcd.dwDrawStage=CDDS_ITEMPREPAINT;n.nmcd.hdc=(HDC)&target;n.nmcd.dwItemSpec=0;n.iSubItem=4;n.clrText=RGB(1,2,3);auto original=n.clrText;int count=nativeNotifies;proc(root,WM_NOTIFY,1001,(LPARAM)&n);require(count==nativeNotifies&&n.clrText==original,"wave cell leaked into native draw handler");}
 }
 int main(int argc,char** argv){
   try{
-    require(argc==3,"plugin and data directory required");directory=std::filesystem::absolute(argv[2]);std::filesystem::create_directories(directory);writeFixture();
+    require(argc==3||(argc==4&&!std::strcmp(argv[3],"--legacy-swell")),"plugin and data directory required");legacySwell=argc==4;directory=std::filesystem::absolute(argv[2]);std::filesystem::create_directories(directory);writeFixture();
     void* module=dlopen(argv[1],RTLD_NOW|RTLD_LOCAL);if(!module)throw std::runtime_error(dlerror());
     auto swell=(int(*)(HINSTANCE,DWORD,LPVOID))dlsym(module,"SWELL_dllMain");
     auto entry=(int(*)(void*,reaper_plugin_info_t*))dlsym(module,"ReaperPluginEntry");require(swell&&entry,"missing plugin exports");
@@ -137,6 +153,12 @@ int main(int argc,char** argv){
     reaper_plugin_info_t rec{};rec.caller_version=REAPER_PLUGIN_VERSION;rec.Register=registerHost;rec.GetFunc=hostApi;
     require(entry(nullptr,&rec)==1&&tick&&command&&toggleState,"extension load failed");
     pump(900);require(columns.size()==5,"wave column not attached");require(settings["status"].find("\"ready\":1")!=std::string::npos,"existing peak not read");require(opens==0,"existing peaks unnecessarily decoded audio");
+    pump(1300);require(columnInserts==1&&columns.size()==5&&columnQueries==0,"legacy SWELL repeatedly appended columns");
+    require(forbiddenOpens==0&&settings["status"].find("\"visible_files\":1")!=std::string::npos,"XML/MIDI triggered a source importer");
+    // A foreign column-count change must pause, never trigger blind insertion.
+    LVCOLUMN extra{};extra.cx=30;extra.pszText=(char*)"Foreign";fInsert(list,5,&extra);int inserts=columnInserts;
+    pump(400);require(columnInserts==inserts&&columns.size()==6,"uncertain column ownership caused insertion loop");
+    fDelete(list,5);pump(400);require(columns.size()==5,"restored native count did not recover");
     NMLVCUSTOMDRAW native{};native.nmcd.hdr={list,1001,NM_CUSTOMDRAW};native.iSubItem=0;require(proc(root,WM_NOTIFY,1001,(LPARAM)&native)==73&&native.clrText==RGB(211,212,213),"native drawing changed");
     paint();require(blits==1&&!invalidBlit,"wave bitmap not drawn or clipped incorrectly");int allocated=allocations;
     paint();require(blits==2&&allocations==allocated,"repeat paint did not reuse raster");
@@ -150,7 +172,8 @@ int main(int argc,char** argv){
     proc(root,WM_COMMAND,42172,0);require(nativeLayoutClean,"native layout command saw foreign column");pump(500);require(columns.size()==5,"column not restored after native command");
     auto source=directory/filename;std::filesystem::last_write_time(source,std::filesystem::last_write_time(source)+std::chrono::seconds(2));pump(1800);
     require(opens>0&&clears>0,"source change did not invalidate stale peaks");require(settings["status"].find("\"ready\":1")!=std::string::npos,"fallback peaks not ready");
+    require(forbiddenOpens==0,"repeated scan attempted XML/MIDI import");
     entry(nullptr,nullptr);require(!tick&&!command&&!toggleState&&proc==nativeProc&&columns.size()==4&&allocations==0,"unload leaked native state or raster");
-    dlclose(module);std::cout<<"PASS load/unload, native notifications, Unicode reapeaks/no decode, alpha raster reuse, layout/toggle, native config isolation, source change/fallback\n";return 0;
+    dlclose(module);std::cout<<"PASS load/unload, native notifications, Unicode reapeaks/no decode, alpha raster reuse, layout/toggle, native config isolation, source change/fallback, XML/MIDI exclusion, legacy SWELL/no insertion loop\n";return 0;
   }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

@@ -1,5 +1,6 @@
 #include "../src/peak_reader_pool.hpp"
 #include "../src/wave_geometry.hpp"
+#include "../src/waveform_file.hpp"
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -8,6 +9,8 @@ void require(bool ok,const char* message){if(!ok)throw std::runtime_error(messag
 int main(int argc,char** argv){
  try {
   require(argc==2,"test output directory required");auto root=std::filesystem::u8path(argv[1]);std::filesystem::create_directories(root);
+  for(const char* name:{"normal.xml","broken.XML","score.musicxml","score.mxl","notes.MID","notes.midi","song.rpp","readme.txt"})require(!mwt::waveformPath(name),"non-waveform importer was permitted");
+  for(const char* name:{"audio.wav","audio.FLAC","/路径/a.ogg","/dir.xml/audio.mp3"})require(mwt::waveformPath(name),"audio path rejected");
   auto source=root/std::filesystem::u8path(u8"音频-test.bin"),peak=root/"source.reapeaks";
   {std::ofstream f(source,std::ios::binary);f<<std::string(4096,'\0');}
   auto wide=[](const std::filesystem::path& p){
