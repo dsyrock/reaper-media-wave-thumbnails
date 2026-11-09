@@ -141,7 +141,9 @@ int main(int argc,char** argv){
     paint();require(blits==1&&!invalidBlit,"wave bitmap not drawn or clipped incorrectly");int allocated=allocations;
     paint();require(blits==2&&allocations==allocated,"repeat paint did not reuse raster");
     require(std::count_if(target.pixels.begin(),target.pixels.end(),[](auto p){return p!=0xff313131;})>0,"empty wave raster");
-    auto wave=columns.back();columns.pop_back();columns.insert(columns.begin(),wave);col(4)->width=217;pump(400);
+    auto waveIt=std::find_if(columns.begin(),columns.end(),[](const auto& c){return c.index==4;});
+    require(waveIt!=columns.end(),"wave column missing before layout change");
+    auto wave=*waveIt;columns.erase(waveIt);columns.insert(columns.begin(),wave);col(4)->width=217;pump(400);
     require(settings["linux_wave_order"]=="0"&&settings["linux_wave_width"]=="217","layout not persisted");
     command(5001,0);require(columns.size()==4&&proc==nativeProc&&toggleState(5001)==0,"toggle did not restore native list");
     command(5001,0);pump(600);require(columns.size()==5&&columns[0].index==4&&col(4)->width==217&&opens==0,"layout/cache not restored");
