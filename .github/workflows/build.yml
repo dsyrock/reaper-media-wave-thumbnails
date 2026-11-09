@@ -23,7 +23,7 @@ jobs:
       - run: ctest --test-dir build-ci --output-on-failure
       - run: |
           file build-ci/reaper_media_wave_thumbnails.dylib
-          lipo -verify_arch ${{ matrix.arch }} build-ci/reaper_media_wave_thumbnails.dylib
+          lipo build-ci/reaper_media_wave_thumbnails.dylib -verify_arch ${{ matrix.arch }}
           nm -gU build-ci/reaper_media_wave_thumbnails.dylib | grep _ReaperPluginEntry
           codesign --force --sign - build-ci/reaper_media_wave_thumbnails.dylib
       - uses: actions/upload-artifact@v4
