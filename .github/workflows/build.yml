@@ -30,13 +30,22 @@ jobs:
         with:
           name: macos-${{ matrix.arch }}-experimental
           path: build-ci/reaper_media_wave_thumbnails.dylib
-  portable:
-    runs-on: ubuntu-latest
+  linux:
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: cmake -S . -B build-ci -DMWT_BUILD_PLUGIN=OFF -DCMAKE_BUILD_TYPE=Release
+      - run: cmake -S . -B build-ci -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build-ci --parallel 2
       - run: ctest --test-dir build-ci --output-on-failure
+      - run: |
+          file build-ci/reaper_media_wave_thumbnails.so
+          nm -D --defined-only build-ci/reaper_media_wave_thumbnails.so | grep -w ReaperPluginEntry
+          nm -D --defined-only build-ci/reaper_media_wave_thumbnails.so | grep -w SWELL_dllMain
+          ldd -r build-ci/reaper_media_wave_thumbnails.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-experimental
+          path: build-ci/reaper_media_wave_thumbnails.so
   windows:
     runs-on: windows-latest
     steps:

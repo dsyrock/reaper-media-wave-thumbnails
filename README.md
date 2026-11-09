@@ -4,6 +4,8 @@ macOS 实验性适配已通过 GitHub Actions 的 arm64 和 x86_64 编译、核�
 
 源码和自动构建位于 [GitHub 仓库](https://github.com/dsyrock/reaper-media-wave-thumbnails)。在 [已通过的构建](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42626370323) 页底部的 Artifacts 下载对应架构插件；下载产物需要登录 GitHub。
 
+Linux x86_64 实验性后端、构建脚本和宿主接口测试已加入，验证范围及安装说明见 [docs/LINUX.md](docs/LINUX.md)。
+
 在 REAPER 原生 Media Explorer 的 Details（详细信息）列表中增加 `Waveform` 列，无需逐个点击音频即可看到整段波形。当前为 Windows x64 实验版 0.3.2，已在 REAPER 7.84 实测。
 
 ## 使用
