@@ -2,6 +2,7 @@
 #include "peak_reader_pool.hpp"
 #include "cpu_profile.hpp"
 #include "wave_raster.hpp"
+#include "dc_state.hpp"
 #include <commctrl.h>
 #include <algorithm>
 #include <array>
@@ -20,7 +21,7 @@
 namespace {
 constexpr char section[] = "MediaWaveThumbnails";
 constexpr wchar_t columnTitle[] = L"Waveform";
-constexpr char version[] = "0.3.1";
+constexpr char version[] = "0.3.2";
 constexpr int bins = 192;
 constexpr size_t bitmapLimit = 512, bitmapBudget = 16 * 1024 * 1024;
 constexpr UINT_PTR subclassId = 0x4D575431;
@@ -45,6 +46,9 @@ uint64_t peakCacheInvalidations{};
 uint64_t directPeakReads{},directPeakBytes{},directFallbacks{},jobTicket{};
 uint64_t pageChangedAt{},pageReadyMs{},pagePublications{};
 int firstDrawReady=-1;
+bool pageNativeRefreshDone=false,pageHadDataWork=false;
+bool nativeItemDraw{};
+LRESULT nativeItemFlags{};
 mwt::CpuCost timerCost,paintCost,rasterCost,scanCost,statusCost;
 uint64_t rowScans{},fileStats{},textQueries{},statusWrites{};
 mwt::PeakReaderPool peakReaders;
@@ -146,6 +150,7 @@ void reserveBitmap(size_t bytes) {
 void dirtyRows() {
   rowWaves.clear();rows.clear();rowsDirty=true;pipelinePending=true;statusDirty=true;
   pageChangedAt=GetTickCount64();firstDrawReady=-1;
+  pageNativeRefreshDone=false;pageHadDataWork=false;
   if(!dirtySince)dirtySince=GetTickCount64();
 }
 PCM_source* activeSource{};
@@ -235,7 +240,7 @@ bool readWave(bool retryOnEmpty) {
       wave.low[x]=float(std::clamp(lo,-1.0,1.0));
       wave.peak=std::max({wave.peak,std::abs(wave.high[x]),std::abs(wave.low[x])});
     }
-    wave.state=1;++builds;
+    wave.state=1;++builds;pageHadDataWork=true;
   }else {
     if(!retryOnEmpty)return false;
     // A simultaneous Media Explorer preview may still be publishing its peak
@@ -326,7 +331,7 @@ void takeDirectResults() {
     }
     if(result.result==mwt::PeakResult::Ready) {
       wave.high=result.data.high;wave.low=result.data.low;wave.peak=result.data.peak;
-      wave.state=1;wave.published=false;++directPeakReads;++builds;directPeakBytes+=result.data.bytesRead;
+      wave.state=1;wave.published=false;pageHadDataWork=true;++directPeakReads;++builds;directPeakBytes+=result.data.bytesRead;
     }else {
       if(result.result==mwt::PeakResult::Stale){wave.sourceChanged=true;wave.batchRead=false;}
       ++directFallbacks;
@@ -362,7 +367,14 @@ void publishPreparedPage() {
     auto& wave=cache.at(row.second);
     if(wave.state==1&&!wave.published){wave.published=true;++changed;changedRow=row.first;}
   }
-  if(changed){++pagePublications;pageReadyMs=GetTickCount64()-pageChangedAt;invalidate(changed==1?changedRow:-1);}
+  if(changed) {
+    ++pagePublications;pageReadyMs=GetTickCount64()-pageChangedAt;
+    if(pageHadDataWork&&!pageNativeRefreshDone) {
+      // A new asynchronous view may have been painted before its native theme
+      // state settled. Refresh native text once, without recoloring it ourselves.
+      pageNativeRefreshDone=true;InvalidateRect(list,nullptr,FALSE);statusDirty=true;
+    }else invalidate(changed==1?changedRow:-1);
+  }
   pipelinePending=activeSource!=nullptr;
   for(const auto& row:rowWaves)if(row.second->state==0){pipelinePending=true;break;}
 }
@@ -407,9 +419,12 @@ bool blitWave(HDC target,const RECT& r,const Wave& wave,COLORREF fg,COLORREF bg)
 }
 void paintWave(NMLVCUSTOMDRAW* n) {
   mwt::CpuScope measure(paintCost);
+  mwt::DcState state(n->nmcd.hdc);
+  if(!state)return;
   statusDirty=true;
   int row=int(n->nmcd.dwItemSpec);RECT r{};
   if(!ListView_GetSubItemRect(list,row,column,LVIR_BOUNDS,&r))return;
+  IntersectClipRect(n->nmcd.hdc,r.left,r.top,r.right,r.bottom);
   COLORREF bg=ListView_GetTextBkColor(list);
   if(bg==CLR_NONE)bg=ListView_GetBkColor(list);
   bool selected=ListView_GetItemState(list,row,LVIS_SELECTED)!=0;
@@ -530,14 +545,26 @@ LRESULT CALLBACK parentProc(HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR
     }
     if(hdr->code==NM_CUSTOMDRAW && column>=0) {
       auto n=reinterpret_cast<NMLVCUSTOMDRAW*>(lp);
-      if(n->nmcd.dwDrawStage==(CDDS_ITEMPREPAINT|CDDS_SUBITEM) && n->iSubItem==column) {
-        try {paintWave(n);}catch(const std::exception& e){lastError=e.what();}
-        return CDRF_SKIPDEFAULT;
+      // Do not force subitem notifications or skip the native cell paint.
+      // Native theme/font/color setup must run with its original draw stages.
+      if((n->nmcd.dwDrawStage&CDDS_SUBITEM)&&n->iSubItem==column)return CDRF_DODEFAULT;
+      LRESULT result=CDRF_DODEFAULT;
+      if(n->nmcd.dwDrawStage==CDDS_PREPAINT) {
+        result=DefSubclassProc(w,m,wp,lp);
+        nativeItemDraw=(result&CDRF_NOTIFYITEMDRAW)!=0;
+        return result|CDRF_NOTIFYITEMDRAW;
       }
-      LRESULT result=DefSubclassProc(w,m,wp,lp);
-      if(n->nmcd.dwDrawStage==CDDS_PREPAINT)result|=CDRF_NOTIFYITEMDRAW;
-      if(n->nmcd.dwDrawStage==CDDS_ITEMPREPAINT)result|=CDRF_NOTIFYSUBITEMDRAW;
-      return result;
+      if(n->nmcd.dwDrawStage==CDDS_ITEMPREPAINT) {
+        if(nativeItemDraw)result=DefSubclassProc(w,m,wp,lp);
+        nativeItemFlags=result;
+        return result|CDRF_NOTIFYPOSTPAINT;
+      }
+      if(n->nmcd.dwDrawStage==CDDS_ITEMPOSTPAINT) {
+        if(nativeItemDraw&&(nativeItemFlags&CDRF_NOTIFYPOSTPAINT))result=DefSubclassProc(w,m,wp,lp);
+        try {paintWave(n);}catch(const std::exception& e){lastError=e.what();statusDirty=true;}
+        return result;
+      }
+      return DefSubclassProc(w,m,wp,lp);
     }
   }
   if(m==WM_NCDESTROY)RemoveWindowSubclass(w,parentProc,subclassId);
@@ -662,7 +689,7 @@ void scanRows() {
     ++it;
   }
   bool changed=rows!=next;
-  if(changed){rowWaves.clear();rows=std::move(next);pageChangedAt=GetTickCount64();firstDrawReady=-1;retainVisibleReads();}
+  if(changed){rowWaves.clear();rows=std::move(next);pageChangedAt=GetTickCount64();firstDrawReady=-1;pageNativeRefreshDone=false;pageHadDataWork=false;retainVisibleReads();}
   if(changed||rowWaves.size()!=rows.size()) {
     rowWaves.clear();for(const auto& row:rows)rowWaves.emplace(row.first,&cache.at(row.second));
   }

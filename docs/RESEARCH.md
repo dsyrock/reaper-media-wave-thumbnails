@@ -53,6 +53,12 @@ REA Ghidra 深度字符串分析中途出现 `Transport closed`，随后会话�
 
 后台文件读取线程降为 below-normal 优先级；没有完成结果时主线程避免获取结果队列锁。诊断内容仅在状态/绘制改变时更新。性能探针和基准专用命令受 `MWT_PROFILE` 编译开关控制，正式构建不包含 QueryThreadCycleTime/Scoped QPC 探针。
 
+## 0.3.2 原生绘制状态兼容
+
+对原生主题遵循其原有 NM_CUSTOMDRAW 返回值，不再强制 NOTIFYSUBITEMDRAW 或在波形单元格 PREPAINT 时 SKIPDEFAULT。扩展在 ITEMPOSTPAINT 覆盖自己的列，同时只向原生回送其主动订阅的项目阶段；自身额外订阅的阶段由扩展处理。所有波形 GDI 操作包在 SaveDC/RestoreDC 中，并裁剪到波形单元格，避免文字颜色、字体、绘制位置和剪裁状态影响后续原生内容。
+
+参考 [Microsoft NM_CUSTOMDRAW](https://learn.microsoft.com/en-us/windows/win32/controls/nm-customdraw-list-view) 的阶段/返回值约定。新页首次异步数据发布时额外安排一次原生区域重绘，热缓存和之后的数据更新继续使用局部重绘。
+
 ## 研究问题状态
 
 | 问题 | 状态 | 证据边界 |
