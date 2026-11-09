@@ -30,6 +30,14 @@ GitHub Actions 使用 Ubuntu 22.04 x86_64，产物名为 `linux-x86_64-experimen
 - 模拟宿主测试不启动实际 REAPER，也不运行真实 SWELL 控件/绘图实现，不能替代 UI 实测。
 - 本机是 Windows，没有 Linux REAPER 测试环境。实际加载、显示、试听、滚动、深浅主题、缩放、停靠窗口和重启布局仍需在 Linux REAPER 验证；`tests/linux-smoke.lua` 提供实际挂接检查入口。
 
-云端验证结果待本轮 Actions 完成后记录。
+2026-11-09，[构建 42645521554](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42645521554) 全部通过，对应源码提交 `3f73d10c29d74336cc6102cab32a5f8c0f6ffc75`：
+
+- Linux 使用 GCC 11.4.0，`portable_core` 和 `linux_host` 两项 CTest 均通过；ELF x86_64 架构、`ReaperPluginEntry` / `SWELL_dllMain` 导出和 `ldd -r` 检查通过。
+- Mac arm64/x86_64 和 Windows x64 同一提交的构建及核心测试通过。
+- Linux `.so` 的 SHA-256：`aac4fe589540ffa9687461abd60612741aca960b31ab18cde32b4ecd5bae20dc`。
+
+在上述构建页面的 Artifacts 下载 `linux-x86_64-experimental`。产物动态依赖系统 libc、libstdc++ 等运行库；较老发行版如无法加载，需在目标发行版重新构建。没有链接 GTK 或独立 SWELL 实现。
+
+修正记录：首次编译使用了 SWELL 不提供的 Win32 选中颜色常量，已改为使用通知中的原生选中文字颜色；宿主测试最初拖错目标列，修正为按逻辑列定位后，全轮测试通过。编译日志仍有上游 SWELL 的未使用参数提示和 Actions 依赖弃用提示，不代表实际 UI 已验证。
 
 参考：[Cockos SWELL generic 窗口实现](https://github.com/justinfrankel/WDL/blob/03c6e564b881a41cb13441cfd7350e92ae1ddf4d/WDL/swell/swell-wnd-generic.cpp)、[generic 绘图实现](https://github.com/justinfrankel/WDL/blob/03c6e564b881a41cb13441cfd7350e92ae1ddf4d/WDL/swell/swell-gdi-lice.cpp)。
