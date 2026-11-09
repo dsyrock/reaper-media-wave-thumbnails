@@ -132,7 +132,7 @@ void draw(NMLVCUSTOMDRAW* n){
   client.top=std::max(int(client.top),SWELL_GetListViewHeaderHeight(list));
   int left=cell.left+6,top=cell.top+3,width=cell.right-cell.left-12,height=cell.bottom-cell.top-6;
   if(width<=0||height<=0||uint64_t(width)*height>4ULL*1024*1024)return;
-  COLORREF color=ListView_GetItemState(list,r->first,LVIS_SELECTED)?GetSysColor(COLOR_HIGHLIGHTTEXT):RGB(48,174,170);
+  COLORREF color=ListView_GetItemState(list,r->first,LVIS_SELECTED)?n->clrText:RGB(48,174,170);
   Key key{wave.revision,width,height,color};auto image=images.find(key);
   if(image==images.end()){
     // SWELL uses LICE_MemBitmap; align the context width so its pixel row span
@@ -206,7 +206,8 @@ void scan(){
   }
   if(rows!=next){rows=std::move(next);pageAt=now();statusDirty=true;InvalidateRect(list,nullptr,FALSE);}
   std::set<std::wstring> paths;for(const auto& row:rows)paths.insert(mwt::pathWide(row.second));
-  if(source&&paths.find(mwt::pathWide(sourcePath))==paths.end())stopSource();cancelHiddenReads(paths);
+  if(source&&paths.find(mwt::pathWide(sourcePath))==paths.end())stopSource();
+  cancelHiddenReads(paths);
   observedTop=first;observedCount=count;
 }
 std::string peakPath(const std::string& path){std::array<char,32768> b{};PeakName(path.c_str(),b.data(),int(b.size()),false);return b.data();}
@@ -263,7 +264,8 @@ void dataTick(){
   if(changed){InvalidateRect(list,nullptr,FALSE);statusDirty=true;}
 }
 void timer(){
-  if(busy)return;busy=true;
+  if(busy)return;
+  busy=true;
   try{
     if(enabled){
       if(!IsWindow(explorer)||!IsWindow(list)){if(explorer)detach();EnumWindows(findRoot,0);}
@@ -297,7 +299,8 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_H
     if(host.Register){host.Register("-timer",(void*)timer);readers.stop();detach();clearImages();host.Register("-hookcommand",(void*)command);host.Register("-toggleaction",(void*)toggled);host.Register("-gaccel",&toggle);host.Register("-gaccel",&refresh);}
     host={};return 0;
   }
-  if(rec->caller_version!=REAPER_PLUGIN_VERSION)return 0;host=*rec;
+  if(rec->caller_version!=REAPER_PLUGIN_VERSION)return 0;
+  host=*rec;
   if(!load(GetExtState,"GetExtState")||!load(SetExtState,"SetExtState")||!load(GetToggleState,"GetToggleCommandStateEx")||!load(IsMediaExtension,"IsMediaExtension")||!load(PeakName,"GetPeakFileNameEx")||!load(ClearPeakCache,"ClearPeakCache")||!load(CreateSource,"PCM_Source_CreateFromFileEx")||!load(DestroySource,"PCM_Source_Destroy")||!load(SourceLength,"GetMediaSourceLength")||!load(Channels,"GetMediaSourceNumChannels")||!load(BuildPeaks,"PCM_Source_BuildPeaks")||!load(GetPeaks,"PCM_Source_GetPeaks")){host={};return 0;}
   enabled=std::string(GetExtState(section,"enabled"))!="0";
   savedOrder=setting("linux_wave_order",-1,0,1024);savedWidth=setting("linux_wave_width",196,24,4096);
