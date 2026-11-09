@@ -1,6 +1,6 @@
-# macOS 适配（实验性源码，尚未在 Mac 编译或实测）
+# macOS 适配（已通过云端编译，尚未在 Mac REAPER 实测）
 
-此阶段提供 macOS 后端和构建入口，不表示已产生可验证的 Mac 插件。仓库由用户稍后提供，当前没有推送代码、创建远程仓库或触发 Actions。
+此阶段提供 macOS 后端和构建入口。公开仓库为 [dsyrock/reaper-media-wave-thumbnails](https://github.com/dsyrock/reaper-media-wave-thumbnails)，Mac arm64 与 x86_64 插件均已通过云端构建和核心测试，仍为实验性产物。
 
 ## 已实现
 
@@ -35,7 +35,16 @@ CMake 会获取固定版本 WDL，只编译 `swell-modstub.mm`（从正在运行
 - 执行 CTest 核心测试、架构检查、入口符号检查，再 ad-hoc 签名并上传 experimental 构建产物。
 - Ubuntu 验证 POSIX 共享层；Windows 编译原有扩展并运行共享层测试。
 
-上述工作流当前**未在 GitHub 执行**。只有 Actions 真正通过后，才可说 Mac 编译已验证。它也不能代替 REAPER 内的 UI 功能验证。
+2026-11-09，[构建 42626370323](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42626370323) 全部通过，对应源码提交 `d4d1d512a6361b994a9756f175dbad9f5d7c6261`：
+
+| 任务 | 结果与产物 |
+| --- | --- |
+| macOS arm64 | 编译、CTest、Mach-O 架构及入口校验、ad-hoc 签名通过；`macos-arm64-experimental` |
+| macOS x86_64 | 同上；`macos-x86_64-experimental` |
+| Windows x64 / MSVC | 编译、CTest 通过；`windows-x64` |
+| Ubuntu | POSIX 共享代码编译、CTest 通过 |
+
+下载时打开上述构建页面，在 Artifacts 中选择自己的架构，解压得到 `reaper_media_wave_thumbnails.dylib`。需要登录 GitHub。云端构建不能代替 REAPER 内的 UI 功能验证。
 
 ## 必须在 Mac 中验证的内容
 
@@ -51,6 +60,6 @@ CMake 会获取固定版本 WDL，只编译 `swell-modstub.mm`（从正在运行
 
 Windows：CMake/MinGW 插件构建通过；CTest `portable_core` 通过（Unicode 路径、属性和随机读取、立体声/末尾瞬态、队列、损坏数据）；原读取器自测和旧 GDI 像素对比通过。按 reaper-test 通过了原波形/缓存/坏文件/同名文件及源文件变化回归。
 
-Mac：无本地 SDK/机器，未编译、未加载；POSIX 分支等待 Linux/macOS 云端测试。没有将 Windows 测试结果冒充 Mac 验证。
+云端：Mac 两种架构已实际编译并运行核心测试；Linux POSIX 测试与 Windows MSVC 构建也已通过。首次构建的 `lipo -verify_arch` 参数顺序有误，修正后完整重跑通过。Mac 插件尚未在 REAPER 中加载、运行，界面和性能仍待实机验证。
 
 主要参考：[Cockos SWELL](https://github.com/justinfrankel/WDL/tree/main/WDL/swell)、[Apple NSTableView](https://developer.apple.com/documentation/appkit/nstableview)、[Cockos 扩展 SDK](https://www.reaper.fm/sdk/plugin/plugin.php)。
