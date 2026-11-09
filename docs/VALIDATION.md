@@ -1,5 +1,7 @@
 # 实测记录
 
+macOS 适配阶段及跨平台共享层的验证边界单列在 [MACOS.md](MACOS.md)：本地 Windows/CMake/核心和 REAPER 回归已通过，Mac 编译与运行尚未执行。
+
 测试日期：2026-11-09（Asia/Shanghai）。当前版本：0.3.2；REAPER 7.84/x64。
 
 按 reaper-test 技能使用 `F:\AGENT\SKILLS\reaper-test\scripts\socket_client.py`，每次握手核对独立资源目录。日常使用的 `C:\REAPER` 未用于本轮测试。

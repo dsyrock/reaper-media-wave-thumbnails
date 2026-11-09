@@ -28,7 +28,9 @@ class PeakReaderPool {
   std::atomic<unsigned> readyCount{0};
   bool stopping=true;
   void run() {
+#ifdef _WIN32
     SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
+#endif
     for(;;) {
       PeakJob job;
       {

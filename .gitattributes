@@ -1,2 +1,4 @@
 # Preserve the SDK's original formatting; it contains upstream trailing spaces.
 third_party/** -whitespace
+*.sh text eol=lf
+*.yml text eol=lf

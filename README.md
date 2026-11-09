@@ -1,5 +1,7 @@
 # Media Explorer 波形缩略图
 
+macOS 实验性适配源码及云端构建入口已加入，详情见 [docs/MACOS.md](docs/MACOS.md)。Mac 版尚未在 macOS 编译/运行，不能视为已验证的可用发行版；Windows 已验证版仍为下述 0.3.2。
+
 在 REAPER 原生 Media Explorer 的 Details（详细信息）列表中增加 `Waveform` 列，无需逐个点击音频即可看到整段波形。当前为 Windows x64 实验版 0.3.2，已在 REAPER 7.84 实测。
 
 ## 使用

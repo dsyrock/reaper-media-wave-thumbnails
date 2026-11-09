@@ -2,7 +2,7 @@
 // Read-only waveform reader based on Cockos' published format:
 // https://www.reaper.fm/sdk/reapeaks.txt (v1.0 RPKM / v1.1 RPKN / v1.2 RPKL).
 // No REAPER calls, audio decoder, or extra on-disk cache is used here.
-#include <windows.h>
+#include "platform_file.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -13,16 +13,6 @@
 
 namespace mwt {
 constexpr int peakBins=192;
-struct FileStamp {
-  uint64_t size{},time{};
-  bool operator==(const FileStamp& b) const{return size==b.size&&time==b.time;}
-};
-inline bool fileStamp(const std::wstring& path,FileStamp& out) {
-  WIN32_FILE_ATTRIBUTE_DATA a{};
-  if(!GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&a)||(a.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY))return false;
-  out={uint64_t(a.nFileSizeHigh)<<32|a.nFileSizeLow,uint64_t(a.ftLastWriteTime.dwHighDateTime)<<32|a.ftLastWriteTime.dwLowDateTime};
-  return true;
-}
 enum class PeakResult {Ready,Unsupported,Stale};
 struct PeakData {
   std::array<float,peakBins> high{},low{};
@@ -39,21 +29,14 @@ inline float decodePeak(int16_t v,bool large) {
   return n/24576.0f;
 }
 inline PeakResult readPeaks(const std::wstring& source,const std::wstring& peakPath,const FileStamp& expected,PeakData& out) {
-  struct File {
-    HANDLE h;
-    explicit File(const wchar_t* name):h(CreateFileW(name,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_RANDOM_ACCESS,nullptr)){}
-    ~File(){if(h!=INVALID_HANDLE_VALUE)CloseHandle(h);}
-  } file(peakPath.c_str());
-  if(file.h==INVALID_HANDLE_VALUE)return PeakResult::Unsupported;
-  BY_HANDLE_FILE_INFORMATION before{},after{};
-  if(!GetFileInformationByHandle(file.h,&before))return PeakResult::Unsupported;
-  uint64_t length=uint64_t(before.nFileSizeHigh)<<32|before.nFileSizeLow;
-  auto readAt=[&](uint64_t offset,void* data,DWORD bytes) {
+  ReadOnlyFile file(peakPath);
+  FileStamp before{},after{};
+  if(!file.snapshot(before))return PeakResult::Unsupported;
+  uint64_t length=before.size;
+  auto readAt=[&](uint64_t offset,void* data,uint32_t bytes) {
     if(offset>length||bytes>length-offset)return false;
-    LARGE_INTEGER pos{};pos.QuadPart=static_cast<LONGLONG>(offset);
-    DWORD got=0;
-    if(!SetFilePointerEx(file.h,pos,nullptr,FILE_BEGIN)||!ReadFile(file.h,data,bytes,&got,nullptr)||got!=bytes)return false;
-    out.bytesRead+=got;return true;
+    if(!file.readAt(offset,data,bytes))return false;
+    out.bytesRead+=bytes;return true;
   };
   unsigned char header[18]{};
   if(!readAt(0,header,sizeof(header)))return PeakResult::Unsupported;
@@ -90,11 +73,11 @@ inline PeakResult readPeaks(const std::wstring& source,const std::wstring& peakP
   for(const auto& level:main)if(level.count>=peakBins*2)selected=level;
   const auto fine=main.front();
   uint64_t span=uint64_t(fine.count)*fine.division,coverage=uint64_t(selected.count)*selected.division;
-  if(span>UINT64_MAX/peakBins)return PeakResult::Unsupported;
+  if(span>(UINT64_MAX-(peakBins-1))/peakBins)return PeakResult::Unsupported;
   uint64_t bytes=uint64_t(selected.count)*channels*(old?2:4);
   if(bytes>32ULL*1024*1024)return PeakResult::Unsupported;
   std::vector<unsigned char> data(static_cast<size_t>(bytes));
-  if(!readAt(selected.offset,data.data(),DWORD(bytes)))return PeakResult::Unsupported;
+  if(!readAt(selected.offset,data.data(),uint32_t(bytes)))return PeakResult::Unsupported;
   const unsigned stride=channels*(old?2:4);
   // Coarse mipmaps can omit an unfinished final interval. Read just that tail
   // from the finest layer, so an end-of-file transient is never discarded.
@@ -105,7 +88,7 @@ inline PeakResult readPeaks(const std::wstring& source,const std::wstring& peakP
     uint64_t tailBytes=uint64_t(fine.count-tailFirst)*stride;
     if(bytes+tailBytes>32ULL*1024*1024)return PeakResult::Unsupported;
     tail.resize(static_cast<size_t>(tailBytes));
-    if(!readAt(fine.offset+uint64_t(tailFirst)*stride,tail.data(),DWORD(tailBytes)))return PeakResult::Unsupported;
+    if(!readAt(fine.offset+uint64_t(tailFirst)*stride,tail.data(),uint32_t(tailBytes)))return PeakResult::Unsupported;
   }
   auto add=[&](const std::vector<unsigned char>& buffer,const Level& level,uint32_t base,uint64_t begin,uint64_t end,float& hi,float& lo) {
     uint32_t first=uint32_t(std::min<uint64_t>(level.count,begin/level.division));
@@ -129,8 +112,7 @@ inline PeakResult readPeaks(const std::wstring& source,const std::wstring& peakP
   }
   FileStamp current;
   if(!fileStamp(source,current)||!(current==expected))return PeakResult::Stale;
-  if(!GetFileInformationByHandle(file.h,&after)||before.nFileSizeHigh!=after.nFileSizeHigh||before.nFileSizeLow!=after.nFileSizeLow||
-     CompareFileTime(&before.ftLastWriteTime,&after.ftLastWriteTime)!=0)return PeakResult::Unsupported;
+  if(!file.snapshot(after)||!(before==after))return PeakResult::Unsupported;
   return PeakResult::Ready;
 }
 }

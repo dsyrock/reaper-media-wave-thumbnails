@@ -1,0 +1,50 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build-ci -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+      - run: cmake --build build-ci --parallel 3
+      - run: ctest --test-dir build-ci --output-on-failure
+      - run: |
+          file build-ci/reaper_media_wave_thumbnails.dylib
+          lipo -verify_arch ${{ matrix.arch }} build-ci/reaper_media_wave_thumbnails.dylib
+          nm -gU build-ci/reaper_media_wave_thumbnails.dylib | grep _ReaperPluginEntry
+          codesign --force --sign - build-ci/reaper_media_wave_thumbnails.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-experimental
+          path: build-ci/reaper_media_wave_thumbnails.dylib
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build-ci -DMWT_BUILD_PLUGIN=OFF -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build-ci --parallel 2
+      - run: ctest --test-dir build-ci --output-on-failure
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build-ci -A x64
+      - run: cmake --build build-ci --config Release --parallel 2
+      - run: ctest --test-dir build-ci -C Release --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: build-ci/Release/reaper_media_wave_thumbnails.dll
