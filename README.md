@@ -1,6 +1,6 @@
 # Media Explorer 波形缩略图
 
-当前正式版：**v0.4.2**，Windows、macOS、Linux 插件内部版本均为 0.4.2。支持点击波形相对位置进行原生试听。Windows 已通过定位及回归测试；Mac/Linux 已通过云端检查，用户也已反馈实机测试通过。操作和验证范围见 [docs/CLICK-PREVIEW.md](docs/CLICK-PREVIEW.md)。
+当前正式发布版为 **v0.4.2**。最新 0.4.3 开发构建新增实时取色面板，支持普通/选中波形独立配色，并通过 REAPER ExtState 跨重启保存。操作见 [波形颜色设置](docs/COLORS.md)，构建下载见 [Actions 42857999958](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42857999958)。
 
 源码和自动构建位于 [GitHub 仓库](https://github.com/dsyrock/reaper-media-wave-thumbnails)。安装包请从 [Release v0.4.2](https://github.com/dsyrock/reaper-media-wave-thumbnails/releases/tag/v0.4.2) 下载，按系统和架构选择 ZIP；公开 Release 附件无需登录 GitHub。
 
@@ -18,6 +18,8 @@ Linux x86_64 已通过云端编译、核心和模拟宿主接口测试，并获�
 
 - `Media Explorer: Toggle waveform thumbnails`：开关波形列；关闭时移除本扩展的列及窗口挂接。
 - `Media Explorer: Refresh waveform thumbnail cache`：重新读取波形。
+- `Media Explorer: Customize waveform colors...`：实时取色、预览、保存或取消。可分配快捷键/工具栏按钮。
+- `Media Explorer: Reset waveform colors to defaults`：恢复并保存默认配色。
 
 卸载：退出 REAPER 后删除 `UserPlugins/reaper_media_wave_thumbnails.dll`。
 

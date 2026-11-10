@@ -26,6 +26,7 @@ local function hex(h,color)
 end
 local phase,at=0,reaper.time_precise()
 local dialog,before,normal,selected,sourceOpens,peakReads
+local pickedHex
 local function nextPhase(n)phase,at=n,reaper.time_precise()end
 local function run()
   local s=status()
@@ -39,6 +40,18 @@ local function run()
   elseif phase==1 and value(s,'color_normal')=='#E04080' then
     assert(reaper.GetExtState(section,'color_normal')==oldNormal,'Live preview was persisted before Save')
     assert(number(s,'source_opens')==sourceOpens and number(s,'direct_peak_reads')==peakReads,'Changing color reread audio/peaks')
+    local ok,l,t,r,b=reaper.JS_Window_GetClientRect(dialog);assert(ok)
+    local scale=(r-l)/410
+    reaper.JS_WindowMessage_Send(dialog,'WM_LBUTTONDOWN',1,0,math.floor(90*scale),math.floor(100*scale))
+    reaper.JS_WindowMessage_Send(dialog,'WM_MOUSEMOVE',1,0,math.floor(170*scale),math.floor(135*scale))
+    reaper.JS_WindowMessage_Send(dialog,'WM_LBUTTONUP',0,0,math.floor(170*scale),math.floor(135*scale))
+    reaper.JS_WindowMessage_Send(dialog,'WM_LBUTTONDOWN',1,0,math.floor(255*scale),math.floor(150*scale))
+    reaper.JS_WindowMessage_Send(dialog,'WM_LBUTTONUP',0,0,math.floor(255*scale),math.floor(150*scale))
+    pickedHex=reaper.JS_Window_GetTitle(reaper.JS_Window_FindChildByID(dialog,3104))
+    assert(pickedHex:match('^#%x%x%x%x%x%x$') and pickedHex~='#E04080','Palette/hue drag did not update HEX')
+    nextPhase(11)
+  elseif phase==11 and value(s,'color_normal')==pickedHex then
+    assert(reaper.GetExtState(section,'color_normal')==oldNormal,'Palette preview persisted before Save')
     command(dialog,2);nextPhase(2)
   elseif phase==2 and value(s,'color_normal')==normal and s:find('"color_editing":false',1,true) then
     print('PASS live color preview without peak reads; Cancel restores previous color')
@@ -55,7 +68,8 @@ local function run()
     command(dialog,2);nextPhase(5)
   elseif phase==5 and value(s,'color_normal')=='#E04080' and value(s,'color_selected')=='#50B5FF' and s:find('"color_editing":false',1,true) then
     print('PASS invalid HEX rejected; both colors saved; Cancel after Reset restores saved colors')
-    dialog=open()
+    dialog=open();nextPhase(6)
+  elseif phase==6 and reaper.time_precise()-at>.25 then
     local ok,l,t,r,b=reaper.JS_Window_GetClientRect(dialog)
     assert(ok)
     local bitmap=reaper.JS_LICE_CreateBitmap(true,r-l,b-t)

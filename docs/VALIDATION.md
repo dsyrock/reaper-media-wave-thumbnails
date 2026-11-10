@@ -6,6 +6,8 @@ Linux 原生后端的云端编译、核心及模拟宿主接口测试已通过�
 
 最新记录日期：2026-11-10（Asia/Shanghai）。当前正式版本：Windows/macOS/Linux 均为 0.4.2。下列历史脚本记录中，点击试听在 Windows 0.3.4 / REAPER 7.84 x64 执行；随后统一正式版本号。
 
+2026-11-11：0.4.3 颜色设置开发构建通过实时取色、保存/取消/重置、实际重启恢复及原有功能回归，详见 [COLORS.md](COLORS.md)。Mac/Linux 新面板 UI 尚待实机回归，跨平台构建和模型测试已通过。
+
 按 reaper-test 技能使用 `F:\AGENT\SKILLS\reaper-test\scripts\socket_client.py`，每次握手核对独立资源目录。日常使用的 `C:\REAPER` 未用于本轮测试。
 
 ## 0.4.2 正式发布验证
