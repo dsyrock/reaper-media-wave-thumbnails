@@ -8,6 +8,12 @@ Linux 原生后端的云端编译、核心及模拟宿主接口测试已通过�
 
 按 reaper-test 技能使用 `F:\AGENT\SKILLS\reaper-test\scripts\socket_client.py`，每次握手核对独立资源目录。日常使用的 `C:\REAPER` 未用于本轮测试。
 
+## 0.4.2 正式发布验证
+
+用户于 2026-11-10 明确反馈 Mac 和 Linux 已完成实机测试，并要求正式发布。各平台内部版本统一为 0.4.2，Mac/Linux 状态字段 `experimental` 为 false。
+
+[构建 42840289229](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42840289229) 对应源码 `e2b668be3ae00eef1341cf9e7625a08d8fae0c23`，Windows、Mac arm64、Mac x86_64、Linux 构建及各自测试均通过。Windows 正式发布 DLL 使用 MinGW 重新构建，SHA-256 为 `d003d3ef3d83f52665b81f731f86a1c774b7cf5a87b040702d366e1ed9d04521`；独立 REAPER 7.84 实例版本读回为 0.4.2，`tests/seek-click.lua` 再次返回 `SEEK_CLICK_ALL_PASSED`。
+
 ## 0.3.4 / 0.4.2 点击波形定位试听
 
 完整行为、数值和限制见 [CLICK-PREVIEW.md](CLICK-PREVIEW.md)。Windows 7.84 的定位、快速连续点击、切换文件、搜索保留、真实 ListView 鼠标消息路径及原有波形/XML 回归均通过；最终跨平台云端构建全部通过。6.83 安装目录已不存在，本轮未重新实测该版本。

@@ -24,12 +24,12 @@
 
 ## 验证（2026-11-10）
 
-- Windows REAPER 7.84、MinGW DLL SHA-256：`3819017ecf89967e4656bfce26eb1046b21057c24954923d573944496f65bb7c`。
+- Windows REAPER 7.84、正式版 0.4.2 MinGW DLL SHA-256：`d003d3ef3d83f52665b81f731f86a1c774b7cf5a87b040702d366e1ed9d04521`。
 - `tests/seek-click.lua` 经 reaper-test 执行，包含原生通知和真实 ListView 鼠标消息路径，返回 `SEEK_CLICK_ALL_PASSED`。
 - 30 秒音频的 25%、80%、50% 读回 7.507、23.987、15.015 秒；40 秒音频的 75%、40% 读回 29.989、15.991 秒；原生列表鼠标消息的 33% 读回 9.968 秒（30 秒素材）。
 - 验证原生预览已缩放时仍按全长定位、快速点击仅最后一次生效、切换文件、过期选择取消、文件名区域不触发定位、波形双击不插入工程、搜索字符串与目录保持。
 - 原有 `tests/regression.lua` 和 `tests/xml-filter.lua` 通过；报告的两个 XML 仍可见且不进入波形缓存。
 - Linux `linux_host` / `linux_host_legacy` 验证定位与播放命令、连续点击、释放前不播放、拖拽取消、修饰键选择、过期选择取消；共享核心测试通过。
-- [最终云端构建 42799354041](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42799354041) 对应代码 `b356b086111a0b5fe8afaa61e0f88bb0868a78ff`，Windows、Linux、Mac arm64/x86_64 全部通过。
+- [正式版云端构建 42840289229](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42840289229) 对应代码 `e2b668be3ae00eef1341cf9e7625a08d8fae0c23`，Windows、Linux、Mac arm64/x86_64 全部通过。Windows 0.4.2 实际加载后再次运行点击试听测试通过，版本读回为 0.4.2。
 
 Windows 自动化未覆盖声卡实际输出/起音听感、所有变速/反向/节拍同步组合及全部素材库排序组合。原先的 `K:\REAPER-test-683` 安装目录现已不存在，未重新执行点击试听功能的 6.83 实机测试；Linux 旧接口模拟测试不能替代它。Mac/Linux 实机验证来自上述用户反馈。
