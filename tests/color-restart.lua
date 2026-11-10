@@ -1,0 +1,12 @@
+local section='MediaWaveThumbnails'
+local status=reaper.GetExtState(section,'status')
+assert(status:find('"color_normal":"#E04080"',1,true) and status:find('"color_selected":"#50B5FF"',1,true),'Colors were not restored after restart: '..status)
+local path=reaper.GetResourcePath()..'/Projects/media-wave-thumbnails/color-test-original.bin'
+local f=assert(io.open(path,'rb'));local normal,selected=string.unpack('s4s4',f:read('a'));f:close()
+reaper.SetExtState(section,'color_normal',normal,true)
+reaper.SetExtState(section,'color_selected',selected,true)
+reaper.Main_OnCommand(reaper.NamedCommandLookup('_MWT_COLORS'),0)
+local dialog=assert(reaper.JS_Window_Find('Waveform colors',true))
+reaper.JS_WindowMessage_Send(dialog,'WM_COMMAND',2,0,0,0)
+os.remove(path)
+print('COLOR_RESTART_PASSED; original test preferences restored')

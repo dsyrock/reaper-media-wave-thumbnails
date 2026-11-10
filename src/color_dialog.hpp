@@ -95,7 +95,7 @@ inline void paint(HDC dc){
   outline(dc,{bar.left-2,hy-2,bar.right+2,hy+3},RGB(255,255,255));
   constexpr uint32_t presets[]={0x37a698,0x50b5ff,0xf3b74a,0xec7187,0xaa8dea,0x79c66a,0xffffff,0x222222};
   for(int i=0;i<8;++i){auto r=rect(16+i*32,237,25,18);fill(dc,r,native(presets[i]));outline(dc,r,RGB(90,90,90));}
-  auto sample=rect(16,267,378,30);fill(dc,sample,target?GetSysColor(COLOR_HIGHLIGHT):RGB(48,48,48));
+  auto sample=rect(16,267,378,30);fill(dc,sample,target?RGB(55,78,110):RGB(48,48,48));
   auto pen=CreatePen(PS_SOLID,std::max(1,int(scale)),native(settings->resolve(target,fallback(target))));auto old=SelectObject(dc,pen);
   for(int px=0;px<370;++px){double amp=(.2+.8*std::abs(std::sin(px*.047)))*std::abs(std::sin(px*.39));int xx=int((20+px)*scale),yy=int(amp*11*scale);int mid=(sample.top+sample.bottom)/2;MoveToEx(dc,xx,mid-yy,nullptr);LineTo(dc,xx,mid+yy+1);}
   SelectObject(dc,old);DeleteObject(pen);
@@ -156,7 +156,7 @@ inline INT_PTR CALLBACK procedure(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
       if(id==theme&&!updating){if(IsDlgButtonChecked(hwnd,theme))settings->preview(target,{});else settings->preview(target,settings->resolve(target,fallback(target)));sync();return TRUE;}
       if(id==hex&&HIWORD(wp)==EN_CHANGE&&!updating){auto value=parseColor(text(hex));if(value){settings->preview(target,value);hsv=rgbHsv(*value);CheckDlgButton(hwnd,theme,FALSE);text(validation,"");}else text(validation,"Enter six hex digits");EnableWindow(GetDlgItem(hwnd,IDOK),bool(value));repaint();return TRUE;}
       if(id==reset){settings->resetDraft();sync();return TRUE;}
-      if(id==IDOK){settings->save();DestroyWindow(hwnd);return TRUE;}
+      if(id==IDOK){if(IsWindowEnabled(GetDlgItem(hwnd,IDOK))){settings->save();DestroyWindow(hwnd);}return TRUE;}
       if(id==IDCANCEL){DestroyWindow(hwnd);return TRUE;}
       break;
     }
