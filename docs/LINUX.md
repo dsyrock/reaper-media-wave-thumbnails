@@ -30,6 +30,20 @@ GitHub Actions 使用 Ubuntu 22.04 x86_64，产物名为 `linux-x86_64-experimen
 - 模拟宿主测试不启动实际 REAPER，也不运行真实 SWELL 控件/绘图实现，不能替代 UI 实测。
 - 本机是 Windows，没有 Linux REAPER 测试环境。实际加载、显示、试听、滚动、深浅主题、缩放、停靠窗口和重启布局仍需在 Linux REAPER 验证；`tests/linux-smoke.lua` 提供实际挂接检查入口。
 
+## 0.4.1：XML 自动导入与旧版重复建列修复
+
+2026-11-10，[构建 42724090986](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42724090986) 全部通过，对应源码提交 `88fc968fcc26f222029d501e059452f9d06865db`。
+
+- `IsMediaExtension` 包含 MIDI/MusicXML，不能作为“安全生成音频波形”的唯一条件。三个后端都在解析文件名及调用源创建前排除 xml/musicxml/mxl、MIDI、工程和文本格式，正常/异常 XML 都不进入波形队列。
+- 旧版 SWELL 尚无 `ListView_GetColumn`：[官方引入提交](https://github.com/justinfrankel/WDL/commit/826d93fbe480483b4bd8e94d0f7bba7619db1382) 日期为 2023-12-28，晚于 REAPER 6.83。原实现读取不到表头就认为列丢失。现在用窗口属性记录自身插入的列，并校验逻辑索引和列数，不再调用该新接口；遇到无法确认的原生列变化时暂停，不盲目补列。
+- Linux 的 `portable_core`、`linux_host`、`linux_host_legacy` 三项 CTest 全部通过。旧接口测试令 `ListView_GetColumn` 缺失，连续扫描仍只插入一次；混合 WAV、正常/异常 XML、MIDI 时，非音频源创建调用为零；额外原生列造成的所有权不确定不会触发增列。
+- Windows 6.83/7.84 的独立 REAPER 实测：报告提供的两个 XML 均在原生列表中可见，只有 WAV 进入波形缓存；列数分别稳定为 25/26。原有音频/缓存/开关回归均通过。此项为 Windows 实测，不能冒充 Linux 6.83 实测。
+- 新 Linux `.so` SHA-256：`d343b06d59ce7862e37395ca0755d6479ea8d75e588b5224d2fd92594f49a0e7`。
+
+更新时正常退出 REAPER，再替换 UserPlugins 中的 `.so`；旧版已经增出的临时列随窗口销毁清除。Linux 6.83 的真实界面仍需用户验证。
+
+## 首次 Linux 适配记录
+
 2026-11-09，[构建 42645521554](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42645521554) 全部通过，对应源码提交 `3f73d10c29d74336cc6102cab32a5f8c0f6ffc75`：
 
 - Linux 使用 GCC 11.4.0，`portable_core` 和 `linux_host` 两项 CTest 均通过；ELF x86_64 架构、`ReaperPluginEntry` / `SWELL_dllMain` 导出和 `ldd -r` 检查通过。

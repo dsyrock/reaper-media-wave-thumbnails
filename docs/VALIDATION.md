@@ -4,9 +4,18 @@ macOS 适配阶段及跨平台共享层的验证边界单列在 [MACOS.md](MACOS
 
 Linux 原生后端的云端编译、核心及模拟宿主接口测试已通过，详见 [LINUX.md](LINUX.md)。Linux REAPER 内的真实控件与绘图尚未实测，模拟宿主测试不算实际 REAPER 测试。
 
-测试日期：2026-11-09（Asia/Shanghai）。当前版本：0.3.2；REAPER 7.84/x64。
+最新测试日期：2026-11-10（Asia/Shanghai）。Windows 当前版本：0.3.3；REAPER 6.83/7.84 x64。Mac/Linux：0.4.1 preview。
 
 按 reaper-test 技能使用 `F:\AGENT\SKILLS\reaper-test\scripts\socket_client.py`，每次握手核对独立资源目录。日常使用的 `C:\REAPER` 未用于本轮测试。
+
+## 0.3.3 / 0.4.1 XML 与 Linux 旧接口回归
+
+- 正常 XML 是 score-partwise MusicXML；异常样本缺少 XML 头部及根标签开头的 `<`。波形功能不应自动将任一种文件交给 MusicXML 导入器。
+- Windows 本地测试 DLL SHA-256：`666da1f1c2d84aa6e1e91171a158df055aa8402a08ee229ab55a5af7bf0a4d5c`。在报告提供的 6.83 可执行程序上使用 `-cfgfile` 指向技能独立资源目录，握手返回 `6.83/x64`，未绕过资源目录检查。
+- 使用原始 XML 样本的副本运行 `tests/xml-filter.lua`：6.83 与 7.84 均报告 `XML_FILTER_OK`，原生可见 XML 行数为 2，波形列表仅含 WAV；稳定观察 4 秒，源创建计数不增长，列数分别稳定为 25/26。
+- 两个版本的 `tests/regression.lua` 均返回 `ALL_REGRESSIONS_PASSED`，覆盖多行波形、中文、单/双声道、静音、滚动、损坏文件、同名不同路径、重复开关和会话缓存复用。
+- 6.83 测试桥临时使用 Mavriq Lua Sockets v1.1.2（Lua 5.3）。最初以新 LuaSocket 启动不兼容，且测试配置恢复旧工程时阻塞桥接；改用匹配依赖并显式 `-new` 启动后通过。测试结束正常退出、恢复原 LuaSocket DLL，技能目录 Git 无改动。
+- 云端构建 [42724090986](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42724090986) 的 Windows、Mac arm64、Mac x86_64、Linux 全部通过；Linux 增加的缺失新接口/防重复插列/XML 零导入测试通过。Linux 真实 REAPER 6.83 及 Mac UI 尚未实测。
 
 ## 0.3.2 深色原生文字与绘制隔离
 
