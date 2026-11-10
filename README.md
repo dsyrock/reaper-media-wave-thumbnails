@@ -1,8 +1,8 @@
 # Media Explorer 波形缩略图
 
-当前正式发布版为 **v0.4.2**。最新 0.4.3 开发构建新增实时取色面板，支持普通/选中波形独立配色，并通过 REAPER ExtState 跨重启保存。操作见 [波形颜色设置](docs/COLORS.md)，构建下载见 [Actions 42857999958](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42857999958)。
+当前正式发布版为 **v0.4.3**，新增实时取色面板，支持普通/选中波形独立配色，并通过 REAPER ExtState 跨重启保存。操作见 [波形颜色设置](docs/COLORS.md)，安装包见 [Release v0.4.3](https://github.com/dsyrock/reaper-media-wave-thumbnails/releases/tag/v0.4.3)。
 
-源码和自动构建位于 [GitHub 仓库](https://github.com/dsyrock/reaper-media-wave-thumbnails)。安装包请从 [Release v0.4.2](https://github.com/dsyrock/reaper-media-wave-thumbnails/releases/tag/v0.4.2) 下载，按系统和架构选择 ZIP；公开 Release 附件无需登录 GitHub。
+源码和自动构建位于 [GitHub 仓库](https://github.com/dsyrock/reaper-media-wave-thumbnails)。安装包请从 [Release v0.4.3](https://github.com/dsyrock/reaper-media-wave-thumbnails/releases/tag/v0.4.3) 下载，按系统和架构选择 ZIP；公开 Release 附件无需登录 GitHub。
 
 Linux x86_64 已通过云端编译、核心和模拟宿主接口测试，并获用户实机验证反馈；安装说明见 [docs/LINUX.md](docs/LINUX.md)。macOS 说明见 [docs/MACOS.md](docs/MACOS.md)。
 
