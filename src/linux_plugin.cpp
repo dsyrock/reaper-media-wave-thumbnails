@@ -2,6 +2,7 @@
 #include "peak_reader_pool.hpp"
 #include "wave_geometry.hpp"
 #include "waveform_file.hpp"
+#include "preview_seek.hpp"
 #include "WDL/lice/lice.h" // pixel layout only; graphics functions come from host SWELL
 #include <chrono>
 #include <cstdlib>
@@ -16,7 +17,7 @@
 // empty cell, with alpha, and leave every native notification unchanged.
 namespace {
 constexpr char section[]="MediaWaveThumbnails";
-constexpr char version[]="0.4.1-linux-preview";
+constexpr char version[]="0.4.2-linux-preview";
 constexpr char columnTitle[]="Waveform";
 reaper_plugin_info_t host{};
 HWND explorer{},list{};
@@ -33,6 +34,8 @@ int observedTop=-1,observedCount=-1;
 std::string directory,error;
 gaccel_register_t toggle{},refresh{};
 mwt::PeakReaderPool readers;
+mwt::PreviewSeek previewSeek;
+int seekRow=-1;
 struct Wave {
   mwt::FileStamp stamp;
   mwt::PeakData data;
@@ -77,7 +80,9 @@ void report(){
   int ready=0;for(const auto& row:rows)if(cache.at(row.second).state==1)++ready;
   std::ostringstream s;s<<"{\"platform\":\"linux\",\"version\":"<<quote(version)<<",\"experimental\":true,\"enabled\":"<<(enabled?"true":"false")
     <<",\"attached\":"<<(column>=0&&list?"true":"false")<<",\"visible_files\":"<<rows.size()<<",\"ready\":"<<ready<<",\"cache\":"<<cache.size()
-    <<",\"direct_peak_reads\":"<<directReads<<",\"source_opens\":"<<sourceOpens<<",\"draws\":"<<draws<<",\"bitmap_builds\":"<<bitmapBuilds<<",\"error\":"<<quote(error)<<'}';
+    <<",\"direct_peak_reads\":"<<directReads<<",\"source_opens\":"<<sourceOpens<<",\"draws\":"<<draws<<",\"bitmap_builds\":"<<bitmapBuilds
+    <<",\"seek_requests\":"<<previewSeek.requests<<",\"seek_completed\":"<<previewSeek.completed<<",\"seek_cancelled\":"<<previewSeek.cancelled
+    <<",\"seek_pending\":"<<(previewSeek.pending()?"true":"false")<<",\"seek_ratio\":"<<previewSeek.lastRatio<<",\"seek_path\":"<<quote(previewSeek.lastPath)<<",\"seek_error\":"<<quote(previewSeek.error)<<",\"error\":"<<quote(error)<<'}';
   SetExtState(section,"status",s.str().c_str(),false);statusDirty=false;
 }
 bool ownsColumn(){
@@ -101,6 +106,7 @@ void saveLayout(bool force=false){
   }
 }
 void removeColumn(){
+  previewSeek.cancel();
   saveLayout(true);bool prior=editing;editing=true;
   if(ownsColumn()){ListView_DeleteColumn(list,column);RemoveProp(list,columnProperty);}
   // Preserve the marker on an ambiguous live list, so toggling cannot append
@@ -138,7 +144,10 @@ void cancelHiddenReads(const std::set<std::wstring>& paths){
   for(const auto& job:readers.retain(paths)){auto i=cache.find(mwt::pathUtf8(job.path));if(i!=cache.end()&&i->second.ticket==job.ticket){i->second.loading=false;i->second.tried=false;}}
 }
 LRESULT parentProc(HWND,UINT,WPARAM,LPARAM);
+std::string resolve(int,const std::string&);
+void scan();
 void detach(){
+  previewSeek.cancel();seekRow=-1;
   stopSource();cancelHiddenReads({});rows.clear();removeColumn();
   if(IsWindow(explorer)&&original&&(WNDPROC)GetWindowLong(explorer,GWL_WNDPROC)==parentProc)SetWindowLong(explorer,GWL_WNDPROC,(LONG_PTR)original);
   explorer=list=nullptr;original=nullptr;nextScan=0;observedTop=observedCount=-1;statusDirty=true;
@@ -179,6 +188,19 @@ LRESULT parentProc(HWND w,UINT message,WPARAM wp,LPARAM lp){
   WNDPROC next=original;
   if(message==WM_CLOSE||message==WM_DESTROY){detach();return next?next(w,message,wp,lp):0;}
   if(message==WM_NOTIFY&&lp){auto* h=(NMHDR*)lp;if(h->hwndFrom==list&&column>=0){
+    if(h->code==LVN_BEGINDRAG)previewSeek.cancel();
+    if(h->code==NM_CLICK||h->code==NM_DBLCLK){
+      auto* click=(NMLISTVIEW*)lp;previewSeek.cancel();
+      if(click->iSubItem==column){
+        scan();
+        auto row=rows.find(click->iItem);RECT cell{};
+        if(!mwt::previewModifiers()&&ownsColumn()&&row!=rows.end()&&cache.at(row->second).state==1&&cache.at(row->second).published&&ListView_GetSubItemRect(list,click->iItem,column,LVIR_BOUNDS,&cell)){
+          auto path=row->second;
+          if(!path.empty()){seekRow=click->iItem;previewSeek.request(path,mwt::thumbnailRatio(click->ptAction.x,cell.left,cell.right),now());statusDirty=true;}
+        }
+        return 0;
+      }
+    }
     if(h->code==LVN_GETDISPINFO){auto* n=(NMLVDISPINFO*)lp;if(n->item.iSubItem==column){if(n->item.pszText&&n->item.cchTextMax>0)n->item.pszText[0]=0;n->item.iImage=-1;n->item.state=0;return 0;}}
     if(h->code==NM_CUSTOMDRAW){auto* n=(NMLVCUSTOMDRAW*)lp;if(n->iSubItem==column){try{draw(n);}catch(const std::exception& e){error=e.what();statusDirty=true;}return 0;}}
     if(h->code==LVN_COLUMNCLICK){if(((NMLISTVIEW*)lp)->iSubItem==column)return 0;nextScan=0;}
@@ -306,6 +328,11 @@ void timer(){
           if(observedTop!=ListView_GetTopIndex(list)||observedCount!=ListView_GetItemCount(list))nextScan=0;
           if(now()>=nextScan){scan();nextScan=now()+1000;}
           dataTick();
+          if(previewSeek.pending()){
+            auto row=rows.find(seekRow);
+            auto path=row!=rows.end()&&ListView_GetItemState(list,seekRow,LVIS_SELECTED)?row->second:std::string{};
+            if(previewSeek.tick(explorer,path,now()))statusDirty=true;
+          }
         }
       }
     }
@@ -316,7 +343,7 @@ void timer(){
 void clearImages(){images.clear();imageBytes=0;}
 bool command(int cmd,int){
   if(cmd==toggle.accel.cmd){enabled=!enabled;if(!enabled)detach();SetExtState(section,"enabled",enabled?"1":"0",true);statusDirty=true;report();return true;}
-  if(cmd==refresh.accel.cmd){stopSource();cancelHiddenReads({});rows.clear();cache.clear();clearImages();nextScan=0;statusDirty=true;return true;}return false;
+  if(cmd==refresh.accel.cmd){previewSeek.cancel();stopSource();cancelHiddenReads({});rows.clear();cache.clear();clearImages();nextScan=0;statusDirty=true;return true;}return false;
 }
 int toggled(int cmd){return cmd==toggle.accel.cmd?int(enabled):-1;}
 template<class T>bool load(T& f,const char* name){f=reinterpret_cast<T>(host.GetFunc(name));return f!=nullptr;}

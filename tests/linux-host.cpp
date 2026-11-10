@@ -16,6 +16,10 @@
 namespace {
 void require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 HWND root=(HWND)1,list=(HWND)2,pathBox=(HWND)3;
+HWND preview=(HWND)4,previewName=(HWND)5,previewTime=(HWND)6;
+int selectedRow=0,nativePlays=0,seekPixel=-1;
+WORD heldButton=0,heldModifier=0;
+std::string loadedPreview;
 std::filesystem::path directory;
 std::map<std::string,std::string> settings;
 void (*tick)()=nullptr;
@@ -39,14 +43,17 @@ LRESULT nativeProc(HWND,UINT message,WPARAM wp,LPARAM lp){
     return 73;
   }
   if(message==WM_COMMAND&&LOWORD(wp)==42172)nativeLayoutClean=columns.size()==4;
+  if(message==WM_COMMAND&&LOWORD(wp)==1008)loadedPreview=filenames.at(selectedRow);
+  if(message==WM_COMMAND&&LOWORD(wp)==40027)++nativePlays;
   return 91;
 }
 WNDPROC proc=nativeProc;
 Column* col(int index){for(auto& c:columns)if(c.index==index)return &c;return nullptr;}
 BOOL fEnumWindows(BOOL(*fn)(HWND,LPARAM),LPARAM lp){fn(root,lp);return TRUE;}
 BOOL fEnumChildren(HWND,BOOL(*)(HWND,LPARAM),LPARAM){return TRUE;}
-HWND fGetDlgItem(HWND w,int id){return w==root?(id==1001?list:id==1002?pathBox:nullptr):nullptr;}
-bool fIsWindow(HWND w){return w==root||w==list||w==pathBox;}
+HWND fGetDlgItem(HWND w,int id){return w==root?(id==1001?list:id==1002?pathBox:id==1046?preview:id==1014?previewName:id==1016?previewTime:nullptr):nullptr;}
+bool fIsWindow(HWND w){return w==root||w==list||w==pathBox||w==preview||w==previewName||w==previewTime;}
+WORD fAsync(int key){return key==VK_LBUTTON?heldButton:key==VK_CONTROL?heldModifier:0;}
 bool fVisible(HWND){return true;}
 int fGetClass(HWND,char* out,int size){std::snprintf(out,size,"SysListView32");return 13;}
 LONG_PTR fGetLong(HWND,int){return (LONG_PTR)proc;}
@@ -54,7 +61,7 @@ LONG_PTR fSetLong(HWND,int,LONG_PTR value){auto old=proc;proc=(WNDPROC)value;ret
 HANDLE fGetProp(HWND,const char* key){return properties[key];}
 BOOL fSetProp(HWND,const char* key,HANDLE value){properties[key]=value;return TRUE;}
 HANDLE fRemoveProp(HWND,const char* key){auto old=properties[key];properties.erase(key);return old;}
-BOOL fGetText(HWND w,int,char* out,int size){std::snprintf(out,size,"%s",w==pathBox?directory.c_str():"");return TRUE;}
+BOOL fGetText(HWND w,int,char* out,int size){std::snprintf(out,size,"%s",w==pathBox?directory.c_str():w==previewName?loadedPreview.c_str():w==previewTime?"0:00.000 / 0:30.000":"");return TRUE;}
 HWND fHeader(HWND w){return w;}
 int fColumnCount(HWND){return int(columns.size());}
 int fWidth(HWND,int index){auto* c=col(index);return c?c->width:0;}
@@ -66,11 +73,11 @@ BOOL fSetOrder(HWND,int count,int* order){std::vector<Column> next;for(int i=0;i
 int fCount(HWND){return int(filenames.size());}
 int fTop(HWND){return 0;}
 int fPerPage(HWND){return 8;}
-int fSelected(HWND,int,UINT){return 0;}
+int fSelected(HWND,int row,UINT mask){return row==selectedRow?(mask&LVIS_SELECTED):0;}
 void fItemText(HWND,int row,int sub,char* out,int size){NMLVDISPINFO n{};n.hdr={list,1001,LVN_GETDISPINFO};n.item.mask=LVIF_TEXT;n.item.iItem=row;n.item.iSubItem=sub;n.item.pszText=out;n.item.cchTextMax=size;proc(root,WM_NOTIFY,1001,(LPARAM)&n);}
-LRESULT fSend(HWND w,UINT msg,WPARAM wp,LPARAM lp){return proc(w,msg,wp,lp);}
+LRESULT fSend(HWND w,UINT msg,WPARAM wp,LPARAM lp){if(w==preview){if(msg==WM_LBUTTONDOWN)seekPixel=int(short(lp&0xffff));return 0;}return proc(w,msg,wp,lp);}
 BOOL fInvalidate(HWND,const RECT*,int){return TRUE;}
-void fClient(HWND,RECT* r){*r={0,0,900,200};}
+void fClient(HWND w,RECT* r){*r=w==preview?RECT{0,0,1000,60}:RECT{0,0,900,200};}
 int fHeaderHeight(HWND){return 24;}
 bool fRect(HWND,int row,int index,int,RECT* r){int x=0;for(const auto& c:columns){if(c.index==index){*r={x,24+row*20,x+c.width,44+row*20};return true;}x+=c.width;}return false;}
 HDC fCreateContext(HDC,int width,int height){++allocations;return (HDC)new Surface{width,height,std::vector<uint32_t>(size_t(width)*height,0)};}
@@ -89,6 +96,7 @@ void* swellApi(const char* name){
   API("EnumWindows",fEnumWindows);API("EnumChildWindows",fEnumChildren);API("GetDlgItem",fGetDlgItem);
   API("IsWindow",fIsWindow);API("IsWindowVisible",fVisible);API("GetClassName",fGetClass);API("GetWindowLong",fGetLong);API("SetWindowLong",fSetLong);
   API("GetProp",fGetProp);API("SetProp",fSetProp);API("RemoveProp",fRemoveProp);
+  API("GetAsyncKeyState",fAsync);
   API("GetDlgItemText",fGetText);API("ListView_GetHeader",fHeader);API("Header_GetItemCount",fColumnCount);API("ListView_GetColumnWidth",fWidth);
   API("ListView_GetColumn",fGetColumn);API("ListView_InsertColumn",fInsert);API("ListView_DeleteColumn",fDelete);
   API("ListView_GetColumnOrderArray",fOrder);API("ListView_SetColumnOrderArray",fSetOrder);API("ListView_GetItemCount",fCount);API("ListView_GetTopIndex",fTop);
@@ -142,6 +150,7 @@ void writeFixture(){
   {std::ofstream midi(directory/"notes.MID");midi<<"MThd";}
 }
 void paint(){NMLVCUSTOMDRAW n{};n.nmcd.hdr={list,1001,NM_CUSTOMDRAW};n.nmcd.dwDrawStage=CDDS_ITEMPREPAINT;n.nmcd.hdc=(HDC)&target;n.nmcd.dwItemSpec=0;n.iSubItem=4;n.clrText=RGB(1,2,3);auto original=n.clrText;int count=nativeNotifies;proc(root,WM_NOTIFY,1001,(LPARAM)&n);require(count==nativeNotifies&&n.clrText==original,"wave cell leaked into native draw handler");}
+void click(double ratio,int code=NM_CLICK){RECT r{};fRect(list,0,4,0,&r);NMLISTVIEW n{};n.hdr={list,1001,UINT(code)};n.iItem=0;n.iSubItem=4;n.ptAction={int(r.left+6+ratio*(r.right-r.left-13)),r.top+8};proc(root,WM_NOTIFY,1001,(LPARAM)&n);}
 }
 int main(int argc,char** argv){
   try{
@@ -170,6 +179,13 @@ int main(int argc,char** argv){
     command(5001,0);require(columns.size()==4&&proc==nativeProc&&toggleState(5001)==0,"toggle did not restore native list");
     command(5001,0);pump(600);require(columns.size()==5&&columns[0].index==4&&col(4)->width==217&&opens==0,"layout/cache not restored");
     proc(root,WM_COMMAND,42172,0);require(nativeLayoutClean,"native layout command saw foreign column");pump(500);require(columns.size()==5,"column not restored after native command");
+    click(.25);pump(700);require(nativePlays==1&&std::abs(seekPixel-250)<10,"thumbnail did not seek through native preview");
+    click(.2);click(.8,NM_DBLCLK);pump(700);require(nativePlays==2&&std::abs(seekPixel-800)<10,"latest thumbnail click did not win");
+    heldButton=0x8000;click(.3);pump(250);require(nativePlays==2,"audition started before mouse release");
+    NMLISTVIEW drag{};drag.hdr={list,1001,LVN_BEGINDRAG};proc(root,WM_NOTIFY,1001,(LPARAM)&drag);heldButton=0;pump(300);require(nativePlays==2,"drag unexpectedly sought playback");
+    heldModifier=0x8000;click(.4);heldModifier=0;pump(300);require(nativePlays==2,"modified selection click sought playback");
+    click(.5);selectedRow=1;pump(300);require(nativePlays==2,"stale click acted after selection changed");selectedRow=0;
+    require(settings["status"].find("\"seek_completed\":2")!=std::string::npos,"seek diagnostics missing");
     auto source=directory/filename;std::filesystem::last_write_time(source,std::filesystem::last_write_time(source)+std::chrono::seconds(2));pump(1800);
     require(opens>0&&clears>0,"source change did not invalidate stale peaks");require(settings["status"].find("\"ready\":1")!=std::string::npos,"fallback peaks not ready");
     require(forbiddenOpens==0,"repeated scan attempted XML/MIDI import");

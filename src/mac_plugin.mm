@@ -3,6 +3,7 @@
 #include "peak_reader_pool.hpp"
 #include "wave_geometry.hpp"
 #include "waveform_file.hpp"
+#include "preview_seek.hpp"
 #include <chrono>
 #include <filesystem>
 #include <map>
@@ -27,7 +28,7 @@ namespace mac {void draw(NSRect,NSTableView*,NSInteger);void layoutChanged();}
 
 namespace mac {
 constexpr char section[]="MediaWaveThumbnails";
-constexpr char version[]="0.4.1-macos-preview";
+constexpr char version[]="0.4.2-macos-preview";
 reaper_plugin_info_t host{};
 NSHashTable *roots=nil,*tables=nil;
 NSTableColumn* own=nil;
@@ -45,6 +46,8 @@ NSInteger observedRows=-1;
 std::string error;
 gaccel_register_t toggle{},refresh{};
 mwt::PeakReaderPool readers;
+mwt::PreviewSeek previewSeek;
+int seekRow=-1;
 struct Wave {mwt::FileStamp stamp;mwt::PeakData data;int state=0;bool loading=false,tried=false,published=false,changed=false;uint64_t revision=0,ticket=0;};
 std::map<std::string,Wave> cache;
 std::map<NSInteger,std::string> rows;
@@ -82,7 +85,9 @@ std::string quote(const std::string& s){std::string out="\"";for(unsigned char c
 void status(){std::ostringstream s;int ready=0;for(const auto& r:rows)if(cache.at(r.second).state==1)++ready;
   s<<"{\"platform\":\"macos\",\"version\":"<<quote(version)<<",\"experimental\":true,\"enabled\":"<<(enabled?"true":"false")
    <<",\"attached\":"<<(own&&table()?"true":"false")<<",\"cache\":"<<cache.size()<<",\"visible_files\":"<<rows.size()
-   <<",\"ready\":"<<ready<<",\"direct_peak_reads\":"<<directReads<<",\"source_opens\":"<<sourceOpens<<",\"draws\":"<<draws<<",\"error\":"<<quote(error)<<'}';
+   <<",\"ready\":"<<ready<<",\"direct_peak_reads\":"<<directReads<<",\"source_opens\":"<<sourceOpens<<",\"draws\":"<<draws
+   <<",\"seek_requests\":"<<previewSeek.requests<<",\"seek_completed\":"<<previewSeek.completed<<",\"seek_cancelled\":"<<previewSeek.cancelled
+   <<",\"seek_pending\":"<<(previewSeek.pending()?"true":"false")<<",\"seek_ratio\":"<<previewSeek.lastRatio<<",\"seek_path\":"<<quote(previewSeek.lastPath)<<",\"seek_error\":"<<quote(previewSeek.error)<<",\"error\":"<<quote(error)<<'}';
   SetExtState(section,"status",s.str().c_str(),false);
 }
 int ownIndex(){
@@ -99,11 +104,14 @@ void saveLayout(bool force=false){auto* t=table();if(editing||!own||!t)return;NS
     layoutPending=true;layoutAt=now();}
   if(layoutPending&&(force||now()-layoutAt>=250)){auto a=std::to_string(savedOrder),b=std::to_string(savedWidth);SetExtState(section,"mac_wave_order",a.c_str(),true);SetExtState(section,"mac_wave_width",b.c_str(),true);layoutPending=false;}}
 void layoutChanged(){if(!editing)saveLayout();}
-void removeColumn(){if(!own)return;saveLayout(true);editing=true;int index=ownIndex();if(index>=0)ListView_DeleteColumn((HWND)table(),index);[own release];own=nil;logical=-1;editing=false;}
+void removeColumn(){previewSeek.cancel();if(!own)return;saveLayout(true);editing=true;int index=ownIndex();if(index>=0)ListView_DeleteColumn((HWND)table(),index);[own release];own=nil;logical=-1;editing=false;}
 void clearImages(){images.clear();imageBytes=0;}
 void stopSource(){if(source){if(building)BuildPeaks(source,2);DestroySource(source);}source=nullptr;building=false;sourcePath.clear();}
 LRESULT parentProc(HWND,UINT,WPARAM,LPARAM);
+std::string resolve(int,const std::string&);
+void scan();
 void detach(){
+  previewSeek.cancel();seekRow=-1;
   stopSource();for(const auto& job:readers.retain({})){auto i=cache.find(mwt::pathUtf8(job.path));if(i!=cache.end()&&i->second.ticket==job.ticket){i->second.loading=false;i->second.tried=false;}}
   rows.clear();removeColumn();
   id t=table();if(t&&observer)[[NSNotificationCenter defaultCenter] removeObserver:observer name:nil object:t];
@@ -114,6 +122,21 @@ LRESULT parentProc(HWND w,UINT message,WPARAM wp,LPARAM lp){
   WNDPROC next=original;
   if(message==WM_CLOSE||message==WM_DESTROY){detach();return next?next(w,message,wp,lp):0;}
   if(message==WM_NOTIFY&&lp){auto* hdr=(NMHDR*)lp;if(hdr->hwndFrom==(HWND)table()){
+    if(hdr->code==LVN_BEGINDRAG)previewSeek.cancel();
+    if(hdr->code==NM_CLICK||hdr->code==NM_DBLCLK){
+      auto* click=(NMLISTVIEW*)lp;previewSeek.cancel();auto* t=table();
+      NSInteger visual=own?[[t tableColumns] indexOfObjectIdenticalTo:own]:NSNotFound;
+      if(visual!=NSNotFound&&click->iSubItem==visual){
+        scan();
+        auto row=rows.find(click->iItem);
+        if(!mwt::previewModifiers()&&row!=rows.end()&&cache.at(row->second).state==1&&cache.at(row->second).published){
+          NSRect cell=[t frameOfCellAtColumn:visual row:click->iItem];
+          auto path=row->second;
+          if(!path.empty()){seekRow=click->iItem;previewSeek.request(path,mwt::thumbnailRatio(click->ptAction.x,cell.origin.x,NSMaxX(cell)),now());}
+        }
+        return 0;
+      }
+    }
     int index=ownIndex();
     if(hdr->code==LVN_GETDISPINFO){auto* n=(NMLVDISPINFO*)lp;if(index>=0&&n->item.iSubItem==index){if(n->item.pszText&&n->item.cchTextMax)n->item.pszText[0]=0;n->item.state=0;n->item.iImage=-1;return 0;}}
     if(hdr->code==NM_CUSTOMDRAW&&index>=0&&((NMLVCUSTOMDRAW*)lp)->iSubItem==index)return 0;
@@ -239,13 +262,18 @@ void tick(){if(busy||![NSThread isMainThread])return;busy=true;
         if(own&&[table() window]&&![table() isHiddenOrHasHiddenAncestor]){
           saveLayout();NSRange visible=[table() rowsInRect:[table() visibleRect]];NSInteger count=[table() numberOfRows];
           if(!NSEqualRanges(visible,observedRange)||count!=observedRows)nextScan=0;
-          if(now()>=nextScan){scan();observedRange=visible;observedRows=count;nextScan=now()+1000;}dataTick();}}}
+          if(now()>=nextScan){scan();observedRange=visible;observedRows=count;nextScan=now()+1000;}dataTick();
+          if(previewSeek.pending()){
+            auto row=rows.find(seekRow);
+            auto path=row!=rows.end()&&[table() isRowSelected:seekRow]?row->second:std::string{};
+            previewSeek.tick(root(),path,now());
+          }}}}
     static uint64_t report=0;if(now()-report>=300){report=now();status();}
   }catch(const std::exception& e){error=e.what();stopSource();}}
   busy=false;
 }
 bool command(int cmd,int){if(cmd==toggle.accel.cmd){enabled=!enabled;if(!enabled)detach();SetExtState(section,"enabled",enabled?"1":"0",true);status();return true;}
-  if(cmd==refresh.accel.cmd){stopSource();readers.retain({});rows.clear();cache.clear();clearImages();nextScan=0;return true;}return false;}
+  if(cmd==refresh.accel.cmd){previewSeek.cancel();stopSource();readers.retain({});rows.clear();cache.clear();clearImages();nextScan=0;return true;}return false;}
 int toggled(int cmd){return cmd==toggle.accel.cmd?int(enabled):-1;}
 template<class T>bool load(T& f,const char* name){f=reinterpret_cast<T>(host.GetFunc(name));return f!=nullptr;}
 }

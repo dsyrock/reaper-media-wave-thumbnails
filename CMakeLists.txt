@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(MediaWaveThumbnails VERSION 0.4.1 LANGUAGES CXX)
+project(MediaWaveThumbnails VERSION 0.4.2 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(WIN32)

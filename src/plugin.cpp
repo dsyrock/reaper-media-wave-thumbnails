@@ -4,6 +4,7 @@
 #include "wave_raster.hpp"
 #include "dc_state.hpp"
 #include "waveform_file.hpp"
+#include "preview_seek.hpp"
 #include <commctrl.h>
 #include <algorithm>
 #include <array>
@@ -22,7 +23,7 @@
 namespace {
 constexpr char section[] = "MediaWaveThumbnails";
 constexpr wchar_t columnTitle[] = L"Waveform";
-constexpr char version[] = "0.3.3";
+constexpr char version[] = "0.3.4";
 constexpr int bins = 192;
 constexpr size_t bitmapLimit = 512, bitmapBudget = 16 * 1024 * 1024;
 constexpr UINT_PTR subclassId = 0x4D575431;
@@ -53,6 +54,8 @@ LRESULT nativeItemFlags{};
 mwt::CpuCost timerCost,paintCost,rasterCost,scanCost,statusCost;
 uint64_t rowScans{},fileStats{},textQueries{},statusWrites{};
 mwt::PeakReaderPool peakReaders;
+mwt::PreviewSeek previewSeek;
+int seekRow=-1;
 uint64_t dirtySince{}, restoreLatency{};
 int observedTop = -1, observedCount = -1;
 std::string lastError;
@@ -480,6 +483,7 @@ void saveWaveLayout(bool force=false) {
   }
 }
 void removeWaveColumn() {
+  previewSeek.cancel();
   if(!ownsColumn())return;
   saveWaveLayout(true);
   int own=column;column=-1;
@@ -510,6 +514,7 @@ bool addWaveColumn() {
   dirtyRows();return true;
 }
 void detach();
+void scanRows();
 LRESULT CALLBACK parentProc(HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR) {
   if(m==WM_CLOSE||m==WM_DESTROY) {
     // Native shutdown saves column preferences. It must see only native
@@ -527,6 +532,22 @@ LRESULT CALLBACK parentProc(HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR
   }
   if(m==WM_NOTIFY && lp && reinterpret_cast<NMHDR*>(lp)->hwndFrom==list) {
     auto hdr=reinterpret_cast<NMHDR*>(lp);
+    if(hdr->code==LVN_BEGINDRAG)previewSeek.cancel();
+    if(hdr->code==NM_CLICK||hdr->code==NM_DBLCLK){
+      auto* click=reinterpret_cast<NMITEMACTIVATE*>(lp);
+      previewSeek.cancel();
+      if(click->iSubItem==column&&column>=0){
+        if(!mwt::previewModifiers()&&ownsColumn()){
+          scanRows(); // refresh hidden full paths in database/search results
+          RECT cell{};auto it=rowWaves.find(click->iItem);
+          if(it!=rowWaves.end()&&it->second->state==1&&it->second->published&&ListView_GetSubItemRect(list,click->iItem,column,LVIR_BOUNDS,&cell)){
+            auto path=rows.count(click->iItem)?rows.at(click->iItem):std::wstring{};
+            if(!path.empty()){seekRow=click->iItem;previewSeek.request(utf8(path),mwt::thumbnailRatio(click->ptAction.x,cell.left,cell.right),GetTickCount64());statusDirty=true;}
+          }
+        }
+        return 0; // double-clicking a waveform must not insert into the project
+      }
+    }
     if(hdr->code==LVN_GETDISPINFOW) {
       auto n=reinterpret_cast<NMLVDISPINFOW*>(lp);
       if(n->item.iSubItem==column && column>=0) {
@@ -601,6 +622,7 @@ LRESULT CALLBACK listProc(HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR) 
   return DefSubclassProc(w,m,wp,lp);
 }
 void detach() {
+  previewSeek.cancel();seekRow=-1;
   stopBuild();dirtyRows();
   removeWaveColumn();
   if(IsWindow(list))RemoveWindowSubclass(list,listProc,subclassId);
@@ -739,6 +761,8 @@ void publishStatus() {
    <<",\"bitmap_builds\":"<<bitmapBuilds<<",\"bitmap_hits\":"<<bitmapHits
    <<",\"bitmap_cache\":"<<bitmaps.size()<<",\"bitmap_bytes\":"<<bitmapBytes<<",\"bitmap_evictions\":"<<bitmapEvictions
    <<",\"peak_array_bytes\":"<<cache.size()*bins*2*sizeof(float)<<",\"restore_latency_ms\":"<<restoreLatency
+   <<",\"seek_requests\":"<<previewSeek.requests<<",\"seek_completed\":"<<previewSeek.completed<<",\"seek_cancelled\":"<<previewSeek.cancelled
+   <<",\"seek_pending\":"<<(previewSeek.pending()?"true":"false")<<",\"seek_ratio\":"<<previewSeek.lastRatio<<",\"seek_path\":"<<json(previewSeek.lastPath)<<",\"seek_error\":"<<json(previewSeek.error)
    <<",\"directory\":"<<json(utf8(currentDirectory))<<",\"error\":"<<json(lastError)<<",\"files\":[";
   bool first=true;
   for(const auto& [r,p]:rows) {
@@ -761,7 +785,7 @@ void timer() {
     }
 #endif
     bool statusDue=statusDirty&&now-lastStatus>=300;
-    if(!rowsDirty&&!pipelinePending&&!layoutPending&&!statusDue&&now<nextIdleCheck){busy=false;return;}
+    if(!previewSeek.pending()&&!rowsDirty&&!pipelinePending&&!layoutPending&&!statusDue&&now<nextIdleCheck){busy=false;return;}
     nextIdleCheck=now+100;
     takeDirectResults();
     if(enabled) {
@@ -779,6 +803,11 @@ void timer() {
           if(changed){lastScan=lastValidation=lastDirectoryCheck=now;scanRows();}
           else if(now-lastValidation>=1000){lastValidation=now;validateVisibleRows();}
           if(pipelinePending){queueDirectReads();processQueue();publishPreparedPage();}
+          if(previewSeek.pending()){
+            auto row=rows.find(seekRow);
+            auto path=(row!=rows.end()&&ListView_GetItemState(list,seekRow,LVIS_SELECTED))?utf8(row->second):std::string{};
+            if(previewSeek.tick(explorer,path,now))statusDirty=true;
+          }
         }
       }
     }
@@ -796,6 +825,7 @@ bool hookCommand(int cmd,int) {
     SetExtState(section,"enabled",enabled?"1":"0",true);publishStatus();return true;
   }
   if(cmd==refreshAction.accel.cmd) {
+    previewSeek.cancel();
     stopBuild();peakReaders.retain({});clearBitmaps();dirtyRows();cache.clear();lastScan=0;lastError.clear();invalidate();publishStatus();return true;
   }
   return false;
