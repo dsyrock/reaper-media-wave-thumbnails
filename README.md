@@ -1,12 +1,12 @@
 # Media Explorer 波形缩略图
 
-当前开发版：Windows 0.3.4、Mac/Linux 0.4.2 preview，新增点击波形相对位置进行原生试听。Windows 7.84 已通过定位及回归测试，Mac/Linux 已通过云端构建和核心/模拟宿主测试，真实 UI 待实机验证。操作和验证范围见 [docs/CLICK-PREVIEW.md](docs/CLICK-PREVIEW.md)。
+当前正式版：**v0.4.2**，Windows、macOS、Linux 插件内部版本均为 0.4.2。支持点击波形相对位置进行原生试听。Windows 已通过定位及回归测试；Mac/Linux 已通过云端检查，用户也已反馈实机测试通过。操作和验证范围见 [docs/CLICK-PREVIEW.md](docs/CLICK-PREVIEW.md)。
 
-源码和自动构建位于 [GitHub 仓库](https://github.com/dsyrock/reaper-media-wave-thumbnails)。最新点击试听开发版请从 [已通过的构建](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42799354041) 页底部的 Artifacts 下载；需要登录 GitHub。[Release v0.4.1-preview.1](https://github.com/dsyrock/reaper-media-wave-thumbnails/releases/tag/v0.4.1-preview.1) 保留上一版的安装包。
+源码和自动构建位于 [GitHub 仓库](https://github.com/dsyrock/reaper-media-wave-thumbnails)。安装包请从 [Release v0.4.2](https://github.com/dsyrock/reaper-media-wave-thumbnails/releases/tag/v0.4.2) 下载，按系统和架构选择 ZIP；公开 Release 附件无需登录 GitHub。
 
-Linux x86_64 实验性后端已通过云端编译、核心测试和模拟宿主接口测试，尚未在 Linux REAPER 内运行验证，安装说明见 [docs/LINUX.md](docs/LINUX.md)。
+Linux x86_64 已通过云端编译、核心和模拟宿主接口测试，并获用户实机验证反馈；安装说明见 [docs/LINUX.md](docs/LINUX.md)。macOS 说明见 [docs/MACOS.md](docs/MACOS.md)。
 
-在 REAPER 原生 Media Explorer 的 Details（详细信息）列表中增加 `Waveform` 列，无需逐个点击音频即可看到整段波形。上一版 0.3.3 已在 REAPER 6.83/7.84 实测；本轮 0.3.4 点击试听在 Windows 7.84 实测。
+在 REAPER 原生 Media Explorer 的 Details（详细信息）列表中增加 `Waveform` 列，无需逐个点击音频即可看到整段波形。Windows 点击试听已在 REAPER 7.84 验证，既有波形功能此前在 6.83/7.84 验证。
 
 ## 使用
 
@@ -42,7 +42,7 @@ Linux x86_64 实验性后端已通过云端编译、核心测试和模拟宿主�
 - 为解析隐藏路径的数据库/搜索行，必要时同步切换完整路径显示，读取后立即恢复完整路径及前导路径选项。
 - 0.3.2 在原生行绘制完成后覆盖波形，不再强制向原生主题代码发送额外的子项绘制通知；波形绘制保存/恢复 DC 并限制到本列。新页异步数据首次就绪时补做一次原生区域刷新，后续波形更新仍尽量局部重画。
 
-本扩展不改写 `reaper.exe` 或 `Plugins/reaper_explorer.dll`。已有缓存按公开格式只读解析，回退处理使用公开 C API；列表控件编号、列序及 Windows 绘制通知属于实现依赖，尚未验证其他 REAPER 版本、非 Windows 系统及第三方列表绘制扩展的组合。试听声音、鼠标拖拽、所有排序/表头菜单组合及大规模素材库性能尚未全面测试。
+本扩展不改写 `reaper.exe` 或 `Plugins/reaper_explorer.dll`。已有缓存按公开格式只读解析，回退处理使用公开 C API；列表控件编号、列序及绘制通知属于实现依赖。不同 REAPER 版本、第三方列表绘制扩展、全部排序/表头菜单组合及大规模素材库性能仍需分别回归。
 
 ## 构建与验证
 

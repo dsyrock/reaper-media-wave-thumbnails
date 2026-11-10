@@ -23,7 +23,7 @@
 namespace {
 constexpr char section[] = "MediaWaveThumbnails";
 constexpr wchar_t columnTitle[] = L"Waveform";
-constexpr char version[] = "0.3.4";
+constexpr char version[] = "0.4.2";
 constexpr int bins = 192;
 constexpr size_t bitmapLimit = 512, bitmapBudget = 16 * 1024 * 1024;
 constexpr UINT_PTR subclassId = 0x4D575431;

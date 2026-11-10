@@ -1,6 +1,8 @@
-# Linux 适配（实验性）
+# Linux 适配
 
 Linux 后端在 REAPER 原生 Media Explorer 的详细列表中插入 Waveform 列，输出 `reaper_media_wave_thumbnails.so`。当前目标为 Linux x86_64；其他 CPU 架构尚未验证。
+
+当前正式版本为 0.4.2。用户于 2026-11-10 反馈 Linux 实机测试通过；自动化构建及新旧 SWELL 模拟宿主测试也已通过。正式安装包见 [Release v0.4.2](https://github.com/dsyrock/reaper-media-wave-thumbnails/releases/tag/v0.4.2)，Actions 产物名为 `linux-x86_64`。以下旧版记录保留各次测试当时的验证边界。
 
 ## 实现与边界
 
@@ -21,14 +23,14 @@ bash build-linux.sh
 
 输出 `dist/linux/reaper_media_wave_thumbnails.so`。CMake 会拉取固定 WDL 提交；离线构建可自行预备 WDL 并传 `-DMWT_WDL_DIR=/path/to/WDL`。也可用 `-DMWT_BUILD_PLUGIN=OFF` 只测试共享代码。
 
-GitHub Actions 使用 Ubuntu 22.04 x86_64，产物名为 `linux-x86_64-experimental`。这是原生 Linux 插件，正常退出 REAPER 后，将 `.so` 放入 REAPER 资源目录的 `UserPlugins`。资源目录请以 REAPER 的“显示资源目录”菜单为准。安装后在主动作列表搜索 `waveform thumbnails`。
+GitHub Actions 使用 Ubuntu 22.04 x86_64，产物名为 `linux-x86_64`。这是原生 Linux 插件，正常退出 REAPER 后，将 `.so` 放入 REAPER 资源目录的 `UserPlugins`。资源目录请以 REAPER 的“显示资源目录”菜单为准。安装后在主动作列表搜索 `waveform thumbnails`。
 
 ## 验证范围
 
 - `portable_core` 检查 Unicode 文件路径、源属性、随机读取、峰值解析、立体声末尾瞬态、绘图几何、后台队列和损坏缓存。
 - `linux_host` 用 `dlopen` 加载真实插件产物，通过模拟 REAPER/SWELL 接口检查插件加载/卸载、原生通知转发、有效 reapeaks 不解码音频、透明位图复用、布局保存与开关、原生列设置隔离、源文件变更和 SDK 回退。
 - 模拟宿主测试不启动实际 REAPER，也不运行真实 SWELL 控件/绘图实现，不能替代 UI 实测。
-- 本机是 Windows，没有 Linux REAPER 测试环境。实际加载、显示、试听、滚动、深浅主题、缩放、停靠窗口和重启布局仍需在 Linux REAPER 验证；`tests/linux-smoke.lua` 提供实际挂接检查入口。
+- 本机是 Windows；Linux 实机结果来自用户反馈。`tests/linux-smoke.lua` 提供后续实际挂接回归入口。
 
 ## 0.4.1：XML 自动导入与旧版重复建列修复
 

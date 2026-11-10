@@ -28,7 +28,7 @@ jobs:
           codesign --force --sign - build-ci/reaper_media_wave_thumbnails.dylib
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.arch }}-experimental
+          name: macos-${{ matrix.arch }}
           path: build-ci/reaper_media_wave_thumbnails.dylib
   linux:
     runs-on: ubuntu-22.04
@@ -44,7 +44,7 @@ jobs:
           ldd -r build-ci/reaper_media_wave_thumbnails.so
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-x86_64-experimental
+          name: linux-x86_64
           path: build-ci/reaper_media_wave_thumbnails.so
   windows:
     runs-on: windows-latest

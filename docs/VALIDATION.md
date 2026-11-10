@@ -1,10 +1,10 @@
 # 实测记录
 
-macOS 适配阶段及跨平台共享层的验证边界单列在 [MACOS.md](MACOS.md)：本地 Windows/CMake/核心和 REAPER 回归已通过；GitHub Actions 已通过 Mac arm64/x86_64 编译和核心测试、Linux POSIX 测试及 Windows MSVC 构建。Mac REAPER 内的运行验证尚未执行。
+macOS 适配阶段及跨平台共享层的验证边界单列在 [MACOS.md](MACOS.md)：本地 Windows/CMake/核心和 REAPER 回归已通过；GitHub Actions 已通过 Mac arm64/x86_64 编译和核心测试、Linux POSIX 测试及 Windows MSVC 构建。用户于 2026-11-10 反馈 Mac 实机测试通过。
 
-Linux 原生后端的云端编译、核心及模拟宿主接口测试已通过，详见 [LINUX.md](LINUX.md)。Linux REAPER 内的真实控件与绘图尚未实测，模拟宿主测试不算实际 REAPER 测试。
+Linux 原生后端的云端编译、核心及模拟宿主接口测试已通过，详见 [LINUX.md](LINUX.md)。用户于 2026-11-10 反馈 Linux 实机测试通过；模拟宿主记录与用户实机反馈分别列明。
 
-最新测试日期：2026-11-10（Asia/Shanghai）。Windows 当前开发版本：0.3.4；本轮 REAPER 7.84 x64。Mac/Linux：0.4.2 preview。
+最新记录日期：2026-11-10（Asia/Shanghai）。当前正式版本：Windows/macOS/Linux 均为 0.4.2。下列历史脚本记录中，点击试听在 Windows 0.3.4 / REAPER 7.84 x64 执行；随后统一正式版本号。
 
 按 reaper-test 技能使用 `F:\AGENT\SKILLS\reaper-test\scripts\socket_client.py`，每次握手核对独立资源目录。日常使用的 `C:\REAPER` 未用于本轮测试。
 

@@ -1,6 +1,6 @@
 # 点击波形定位试听
 
-当前开发版本：Windows 0.3.4，Mac/Linux 0.4.2 preview。
+当前正式版本：各平台均为 0.4.2。用户于 2026-11-10 反馈 Mac 和 Linux 均已实机测试，并确认移除预发布标记。下列数值及脚本覆盖来自 Windows 自动化记录，Mac/Linux 实机结果按用户反馈记录。
 
 ## 操作
 
@@ -32,4 +32,4 @@
 - Linux `linux_host` / `linux_host_legacy` 验证定位与播放命令、连续点击、释放前不播放、拖拽取消、修饰键选择、过期选择取消；共享核心测试通过。
 - [最终云端构建 42799354041](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42799354041) 对应代码 `b356b086111a0b5fe8afaa61e0f88bb0868a78ff`，Windows、Linux、Mac arm64/x86_64 全部通过。
 
-本次未验证：Mac/Linux 的真实 UI、声卡实际输出/起音听感、所有变速/反向/节拍同步组合、所有素材库排序组合。原先的 `K:\REAPER-test-683` 安装目录现已不存在，未重新执行本轮 6.83 实机测试；Linux 旧接口模拟测试不能替代它。
+Windows 自动化未覆盖声卡实际输出/起音听感、所有变速/反向/节拍同步组合及全部素材库排序组合。原先的 `K:\REAPER-test-683` 安装目录现已不存在，未重新执行点击试听功能的 6.83 实机测试；Linux 旧接口模拟测试不能替代它。Mac/Linux 实机验证来自上述用户反馈。

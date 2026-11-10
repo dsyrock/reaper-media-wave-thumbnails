@@ -28,7 +28,7 @@ namespace mac {void draw(NSRect,NSTableView*,NSInteger);void layoutChanged();}
 
 namespace mac {
 constexpr char section[]="MediaWaveThumbnails";
-constexpr char version[]="0.4.2-macos-preview";
+constexpr char version[]="0.4.2";
 reaper_plugin_info_t host{};
 NSHashTable *roots=nil,*tables=nil;
 NSTableColumn* own=nil;
@@ -83,7 +83,7 @@ std::string text(HWND h){std::array<char,32768> b{};GetWindowText(h,b.data(),int
 std::string item(int row,int sub){std::array<char,32768> b{};ListView_GetItemText((HWND)table(),row,sub,b.data(),int(b.size()));return b.data();}
 std::string quote(const std::string& s){std::string out="\"";for(unsigned char c:s){if(c=='"'||c=='\\')out+='\\';if(c>=32)out+=char(c);}return out+'"';}
 void status(){std::ostringstream s;int ready=0;for(const auto& r:rows)if(cache.at(r.second).state==1)++ready;
-  s<<"{\"platform\":\"macos\",\"version\":"<<quote(version)<<",\"experimental\":true,\"enabled\":"<<(enabled?"true":"false")
+  s<<"{\"platform\":\"macos\",\"version\":"<<quote(version)<<",\"experimental\":false,\"enabled\":"<<(enabled?"true":"false")
    <<",\"attached\":"<<(own&&table()?"true":"false")<<",\"cache\":"<<cache.size()<<",\"visible_files\":"<<rows.size()
    <<",\"ready\":"<<ready<<",\"direct_peak_reads\":"<<directReads<<",\"source_opens\":"<<sourceOpens<<",\"draws\":"<<draws
    <<",\"seek_requests\":"<<previewSeek.requests<<",\"seek_completed\":"<<previewSeek.completed<<",\"seek_cancelled\":"<<previewSeek.cancelled

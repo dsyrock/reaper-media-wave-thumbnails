@@ -1,6 +1,6 @@
-# macOS 适配（已通过云端编译，尚未在 Mac REAPER 实测）
+# macOS 适配
 
-此阶段提供 macOS 后端和构建入口。公开仓库为 [dsyrock/reaper-media-wave-thumbnails](https://github.com/dsyrock/reaper-media-wave-thumbnails)，Mac arm64 与 x86_64 插件均已通过云端构建和核心测试，仍为实验性产物。
+当前正式版本为 0.4.2。公开仓库为 [dsyrock/reaper-media-wave-thumbnails](https://github.com/dsyrock/reaper-media-wave-thumbnails)，Mac arm64 与 x86_64 插件均已通过云端构建和核心测试，用户于 2026-11-10 反馈 Mac 实机测试通过。安装包见 [Release v0.4.2](https://github.com/dsyrock/reaper-media-wave-thumbnails/releases/tag/v0.4.2)。以下旧版构建记录保留当时的验证边界。
 
 ## 已实现
 
@@ -46,7 +46,7 @@ CMake 会获取固定版本 WDL，只编译 `swell-modstub.mm`（从正在运行
 
 下载时打开上述构建页面，在 Artifacts 中选择自己的架构，解压得到 `reaper_media_wave_thumbnails.dylib`。需要登录 GitHub。云端构建不能代替 REAPER 内的 UI 功能验证。
 
-## 必须在 Mac 中验证的内容
+## 后续 Mac 实机回归关注点
 
 1. DLL 等价的 dylib 正常加载，`tests/mac-smoke.lua` 报告正确平台与附件状态。
 2. 控件类型为预期的 SWELL NSCell-based NSTableView；view-based 或无窗口过程的实现会拒绝挂接并报告诊断。
@@ -54,12 +54,12 @@ CMake 会获取固定版本 WDL，只编译 `swell-modstub.mm`（从正在运行
 4. Retina 与普通显示器、深浅主题、选择颜色，原生列配置/排序/拖拽，列顺序和宽度重启保持。
 5. 关闭窗口/停靠切换/退出的清理行为。其他扩展同时替换同一 SWELL 窗口过程的情况，以及动态卸载尚未验证，不作为支持承诺。
 
-目前 Mac 后端的 UI 轮询/原生列保护尚未达到 Windows 实机验证范围；其行为和性能不能直接套用 Windows 的测量结果。
+Mac 实机结果来自用户反馈；下列 Windows 性能测量不能直接作为 Mac 的测量结果。
 
 ## 本地验证记录
 
 Windows：CMake/MinGW 插件构建通过；CTest `portable_core` 通过（Unicode 路径、属性和随机读取、立体声/末尾瞬态、队列、损坏数据）；原读取器自测和旧 GDI 像素对比通过。按 reaper-test 通过了原波形/缓存/坏文件/同名文件及源文件变化回归。
 
-云端：Mac 两种架构已实际编译并运行核心测试；Linux POSIX 测试与 Windows MSVC 构建也已通过。首次构建的 `lipo -verify_arch` 参数顺序有误，修正后完整重跑通过。Mac 插件尚未在 REAPER 中加载、运行，界面和性能仍待实机验证。
+云端：Mac 两种架构已实际编译并运行核心测试；Linux POSIX 测试与 Windows MSVC 构建也已通过。首次构建的 `lipo -verify_arch` 参数顺序有误，修正后完整重跑通过。2026-11-10 用户补充反馈 Mac 实机测试通过。
 
 主要参考：[Cockos SWELL](https://github.com/justinfrankel/WDL/tree/main/WDL/swell)、[Apple NSTableView](https://developer.apple.com/documentation/appkit/nstableview)、[Cockos 扩展 SDK](https://www.reaper.fm/sdk/plugin/plugin.php)。

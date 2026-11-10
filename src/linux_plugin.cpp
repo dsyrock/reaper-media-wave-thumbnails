@@ -17,7 +17,7 @@
 // empty cell, with alpha, and leave every native notification unchanged.
 namespace {
 constexpr char section[]="MediaWaveThumbnails";
-constexpr char version[]="0.4.2-linux-preview";
+constexpr char version[]="0.4.2";
 constexpr char columnTitle[]="Waveform";
 reaper_plugin_info_t host{};
 HWND explorer{},list{};
@@ -78,7 +78,7 @@ std::string quote(const std::string& value){std::string out="\"";for(unsigned ch
 void report(){
   if(!statusDirty)return;
   int ready=0;for(const auto& row:rows)if(cache.at(row.second).state==1)++ready;
-  std::ostringstream s;s<<"{\"platform\":\"linux\",\"version\":"<<quote(version)<<",\"experimental\":true,\"enabled\":"<<(enabled?"true":"false")
+  std::ostringstream s;s<<"{\"platform\":\"linux\",\"version\":"<<quote(version)<<",\"experimental\":false,\"enabled\":"<<(enabled?"true":"false")
     <<",\"attached\":"<<(column>=0&&list?"true":"false")<<",\"visible_files\":"<<rows.size()<<",\"ready\":"<<ready<<",\"cache\":"<<cache.size()
     <<",\"direct_peak_reads\":"<<directReads<<",\"source_opens\":"<<sourceOpens<<",\"draws\":"<<draws<<",\"bitmap_builds\":"<<bitmapBuilds
     <<",\"seek_requests\":"<<previewSeek.requests<<",\"seek_completed\":"<<previewSeek.completed<<",\"seek_cancelled\":"<<previewSeek.cancelled
