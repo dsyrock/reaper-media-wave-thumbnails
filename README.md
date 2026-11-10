@@ -2,7 +2,7 @@
 
 macOS 实验性适配已通过 GitHub Actions 的 arm64 和 x86_64 编译、核心测试及架构/入口校验，尚未在 Mac REAPER 中运行验证，详情见 [docs/MACOS.md](docs/MACOS.md)。Windows 已实机验证版为下述 0.3.3，Mac/Linux 当前为 0.4.1 preview。
 
-源码和自动构建位于 [GitHub 仓库](https://github.com/dsyrock/reaper-media-wave-thumbnails)。在 [已通过的构建](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42724090986) 页底部的 Artifacts 下载 Windows x64、Mac arm64/x86_64 或 Linux x86_64 插件；下载产物需要登录 GitHub。
+源码和自动构建位于 [GitHub 仓库](https://github.com/dsyrock/reaper-media-wave-thumbnails)。安装包请从 [Release v0.4.1-preview.1](https://github.com/dsyrock/reaper-media-wave-thumbnails/releases/tag/v0.4.1-preview.1) 下载，按系统和架构选择 ZIP。也可在 [已通过的构建](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42724090986) 页底部的 Artifacts 下载开发构建；Actions 产物需要登录 GitHub。
 
 Linux x86_64 实验性后端已通过云端编译、核心测试和模拟宿主接口测试，尚未在 Linux REAPER 内运行验证，安装说明见 [docs/LINUX.md](docs/LINUX.md)。
 
