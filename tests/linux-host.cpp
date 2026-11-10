@@ -134,7 +134,7 @@ int registerHost(const char* name,void* value){
   if(!std::strcmp(name,"-hookcommand"))command=nullptr;
   if(!std::strcmp(name,"toggleaction"))toggleState=(int(*)(int))value;
   if(!std::strcmp(name,"-toggleaction"))toggleState=nullptr;
-  if(!std::strcmp(name,"command_id"))return !std::strcmp((const char*)value,"MWT_TOGGLE")?5001:5002;
+  if(!std::strcmp(name,"command_id")){auto id=std::string((const char*)value);return id=="MWT_TOGGLE"?5001:id=="MWT_REFRESH"?5002:id=="MWT_COLORS"?5003:5004;}
   return 1;
 }
 void pump(int ms){auto end=std::chrono::steady_clock::now()+std::chrono::milliseconds(ms);do{tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}while(std::chrono::steady_clock::now()<end);}
@@ -159,6 +159,7 @@ int main(int argc,char** argv){
     auto swell=(int(*)(HINSTANCE,DWORD,LPVOID))dlsym(module,"SWELL_dllMain");
     auto entry=(int(*)(void*,reaper_plugin_info_t*))dlsym(module,"ReaperPluginEntry");require(swell&&entry,"missing plugin exports");
     require(swell(nullptr,DLL_PROCESS_ATTACH,(void*)swellApi)==1,"SWELL API import failed");
+    settings["color_normal"]="#F06020";settings["color_selected"]="#112233";
     reaper_plugin_info_t rec{};rec.caller_version=REAPER_PLUGIN_VERSION;rec.Register=registerHost;rec.GetFunc=hostApi;
     require(entry(nullptr,&rec)==1&&tick&&command&&toggleState,"extension load failed");
     pump(900);require(columns.size()==5,"wave column not attached");require(settings["status"].find("\"ready\":1")!=std::string::npos,"existing peak not read");require(opens==0,"existing peaks unnecessarily decoded audio");
@@ -170,7 +171,11 @@ int main(int argc,char** argv){
     fDelete(list,5);pump(400);require(columns.size()==5,"restored native count did not recover");
     NMLVCUSTOMDRAW native{};native.nmcd.hdr={list,1001,NM_CUSTOMDRAW};native.iSubItem=0;require(proc(root,WM_NOTIFY,1001,(LPARAM)&native)==73&&native.clrText==RGB(211,212,213),"native drawing changed");
     paint();require(blits==1&&!invalidBlit,"wave bitmap not drawn or clipped incorrectly");int allocated=allocations;
+    require(std::find(target.pixels.begin(),target.pixels.end(),0xff112233)!=target.pixels.end(),"selected waveform did not use persisted color");
     paint();require(blits==2&&allocations==allocated,"repeat paint did not reuse raster");
+    selectedRow=-1;paint();selectedRow=0;
+    require(std::find(target.pixels.begin(),target.pixels.end(),0xfff06020)!=target.pixels.end(),"normal waveform did not use persisted color");
+    command(5004,0);require(settings["color_normal"].empty()&&settings["color_selected"].empty()&&opens==0,"reset colors changed audio cache or failed to persist defaults");
     require(std::count_if(target.pixels.begin(),target.pixels.end(),[](auto p){return p!=0xff313131;})>0,"empty wave raster");
     auto waveIt=std::find_if(columns.begin(),columns.end(),[](const auto& c){return c.index==4;});
     require(waveIt!=columns.end(),"wave column missing before layout change");

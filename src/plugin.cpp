@@ -5,6 +5,7 @@
 #include "dc_state.hpp"
 #include "waveform_file.hpp"
 #include "preview_seek.hpp"
+#include "color_dialog.hpp"
 #include <commctrl.h>
 #include <algorithm>
 #include <array>
@@ -23,7 +24,7 @@
 namespace {
 constexpr char section[] = "MediaWaveThumbnails";
 constexpr wchar_t columnTitle[] = L"Waveform";
-constexpr char version[] = "0.4.2";
+constexpr char version[] = "0.4.3";
 constexpr int bins = 192;
 constexpr size_t bitmapLimit = 512, bitmapBudget = 16 * 1024 * 1024;
 constexpr UINT_PTR subclassId = 0x4D575431;
@@ -60,7 +61,9 @@ uint64_t dirtySince{}, restoreLatency{};
 int observedTop = -1, observedCount = -1;
 std::string lastError;
 std::wstring currentDirectory;
-gaccel_register_t toggleAction{}, refreshAction{};
+gaccel_register_t toggleAction{}, refreshAction{},colorAction{},resetColorAction{};
+mwt::ColorSettings colors;
+uint32_t defaultColor(int selected){if(!selected)return 0x37a698;auto c=GetSysColor(COLOR_HIGHLIGHTTEXT);return (GetRValue(c)<<16)|(GetGValue(c)<<8)|GetBValue(c);}
 
 HWND (*OpenMediaExplorer)(const char*, bool);
 PCM_source* (*CreateSource)(const char*, bool);
@@ -441,7 +444,7 @@ void paintWave(NMLVCUSTOMDRAW* n) {
   auto& wave=*rowIt->second;
   r.left+=6;r.right-=6;r.top+=3;r.bottom-=3;
   if(r.right<=r.left||r.bottom<=r.top)return;
-  COLORREF color=selected?GetSysColor(COLOR_HIGHLIGHTTEXT):RGB(55,166,152);
+  COLORREF color=mwt::colorui::native(colors.resolve(selected?1:0,defaultColor(selected)));
   if(wave.state==1&&wave.published) {
     if(firstDrawReady<0)firstDrawReady=publishedRows();
     if(!blitWave(n->nmcd.hdc,r,wave,color,bg))drawEnvelope(n->nmcd.hdc,r,wave,color);
@@ -768,6 +771,7 @@ void publishStatus() {
    <<",\"bitmap_builds\":"<<bitmapBuilds<<",\"bitmap_hits\":"<<bitmapHits
    <<",\"bitmap_cache\":"<<bitmaps.size()<<",\"bitmap_bytes\":"<<bitmapBytes<<",\"bitmap_evictions\":"<<bitmapEvictions
    <<",\"peak_array_bytes\":"<<cache.size()*bins*2*sizeof(float)<<",\"restore_latency_ms\":"<<restoreLatency
+   <<",\"color_normal\":"<<json(colors.text(0))<<",\"color_selected\":"<<json(colors.text(1))<<",\"color_editing\":"<<(colors.editing?"true":"false")
    <<",\"seek_requests\":"<<previewSeek.requests<<",\"seek_completed\":"<<previewSeek.completed<<",\"seek_cancelled\":"<<previewSeek.cancelled
    <<",\"seek_pending\":"<<(previewSeek.pending()?"true":"false")<<",\"seek_ratio\":"<<previewSeek.lastRatio<<",\"seek_path\":"<<json(previewSeek.lastPath)<<",\"seek_error\":"<<json(previewSeek.error)
    <<",\"directory\":"<<json(utf8(currentDirectory))<<",\"error\":"<<json(lastError)<<",\"files\":[";
@@ -827,6 +831,8 @@ void timer() {
   busy=false;
 }
 bool hookCommand(int cmd,int) {
+  if(cmd==colorAction.accel.cmd){mwt::colorui::show(host.hwnd_main,colors,defaultColor);return true;}
+  if(cmd==resetColorAction.accel.cmd){mwt::colorui::close();colors.resetSaved();return true;}
   if(cmd==toggleAction.accel.cmd) {
     enabled=!enabled;if(!enabled)detach();
     SetExtState(section,"enabled",enabled?"1":"0",true);publishStatus();return true;
@@ -849,12 +855,15 @@ int layoutSetting(const char* key,int fallback,int max) {
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(HINSTANCE,reaper_plugin_info_t* rec) {
   if(!rec) {
     if(host.Register) {
+      mwt::colorui::close();
+      host.Register("-accelerator",&mwt::colorui::accelerator);
       host.Register("-timer",reinterpret_cast<void*>(timer));
       peakReaders.stop();detach();saveWaveLayout(true);clearBitmaps();
       if(bitmapDC){DeleteDC(bitmapDC);bitmapDC=nullptr;}
       host.Register("-hookcommand",reinterpret_cast<void*>(hookCommand));
       host.Register("-toggleaction",reinterpret_cast<void*>(toggleState));
       host.Register("-gaccel",&toggleAction);host.Register("-gaccel",&refreshAction);
+      host.Register("-gaccel",&colorAction);host.Register("-gaccel",&resetColorAction);
     }
     return 0;
   }
@@ -868,6 +877,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(HINSTANCE,reape
      !load(IsMediaExtension,"IsMediaExtension")||!load(GetPeakFileNameEx,"GetPeakFileNameEx")||
      !load(ClearPeakCache,"ClearPeakCache"))return 0;
   enabled=std::string(GetExtState(section,"enabled"))!="0";
+  colors.get=GetExtState;colors.set=SetExtState;colors.load();colors.changed=[] {clearBitmaps();invalidate();statusDirty=true;};
   waveOrder=layoutSetting("wave_order",-1,65535);
   waveWidth=layoutSetting("wave_width",196,65535);
   try {peakReaders.start();}catch(const std::exception& e){lastError=e.what();return 0;}
@@ -875,7 +885,11 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(HINSTANCE,reape
   toggleAction.desc="Media Explorer: Toggle waveform thumbnails";
   refreshAction.accel.cmd=WORD(host.Register("command_id",const_cast<char*>("MWT_REFRESH")));
   refreshAction.desc="Media Explorer: Refresh waveform thumbnail cache";
+  colorAction.accel.cmd=WORD(host.Register("command_id",const_cast<char*>("MWT_COLORS")));colorAction.desc="Media Explorer: Customize waveform colors...";
+  resetColorAction.accel.cmd=WORD(host.Register("command_id",const_cast<char*>("MWT_COLORS_RESET")));resetColorAction.desc="Media Explorer: Reset waveform colors to defaults";
   host.Register("gaccel",&toggleAction);host.Register("gaccel",&refreshAction);
+  host.Register("gaccel",&colorAction);host.Register("gaccel",&resetColorAction);
+  host.Register("accelerator",&mwt::colorui::accelerator);
   host.Register("hookcommand",reinterpret_cast<void*>(hookCommand));
   host.Register("toggleaction",reinterpret_cast<void*>(toggleState));
   host.Register("timer",reinterpret_cast<void*>(timer));

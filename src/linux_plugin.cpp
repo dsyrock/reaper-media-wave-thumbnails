@@ -3,6 +3,7 @@
 #include "wave_geometry.hpp"
 #include "waveform_file.hpp"
 #include "preview_seek.hpp"
+#include "color_dialog.hpp"
 #include "WDL/lice/lice.h" // pixel layout only; graphics functions come from host SWELL
 #include <chrono>
 #include <cstdlib>
@@ -17,7 +18,7 @@
 // empty cell, with alpha, and leave every native notification unchanged.
 namespace {
 constexpr char section[]="MediaWaveThumbnails";
-constexpr char version[]="0.4.2";
+constexpr char version[]="0.4.3";
 constexpr char columnTitle[]="Waveform";
 reaper_plugin_info_t host{};
 HWND explorer{},list{};
@@ -32,7 +33,8 @@ uint64_t layoutAt{},columnsAfter{},nextScan{},pageAt{},revision{},ticket{};
 uint64_t directReads{},sourceOpens{},draws{},rasterTick{},bitmapBuilds{};
 int observedTop=-1,observedCount=-1;
 std::string directory,error;
-gaccel_register_t toggle{},refresh{};
+gaccel_register_t toggle{},refresh{},colorAction{},resetColorAction{};
+mwt::ColorSettings colors;
 mwt::PeakReaderPool readers;
 mwt::PreviewSeek previewSeek;
 int seekRow=-1;
@@ -81,6 +83,7 @@ void report(){
   std::ostringstream s;s<<"{\"platform\":\"linux\",\"version\":"<<quote(version)<<",\"experimental\":false,\"enabled\":"<<(enabled?"true":"false")
     <<",\"attached\":"<<(column>=0&&list?"true":"false")<<",\"visible_files\":"<<rows.size()<<",\"ready\":"<<ready<<",\"cache\":"<<cache.size()
     <<",\"direct_peak_reads\":"<<directReads<<",\"source_opens\":"<<sourceOpens<<",\"draws\":"<<draws<<",\"bitmap_builds\":"<<bitmapBuilds
+    <<",\"color_normal\":"<<quote(colors.text(0))<<",\"color_selected\":"<<quote(colors.text(1))<<",\"color_editing\":"<<(colors.editing?"true":"false")
     <<",\"seek_requests\":"<<previewSeek.requests<<",\"seek_completed\":"<<previewSeek.completed<<",\"seek_cancelled\":"<<previewSeek.cancelled
     <<",\"seek_pending\":"<<(previewSeek.pending()?"true":"false")<<",\"seek_ratio\":"<<previewSeek.lastRatio<<",\"seek_path\":"<<quote(previewSeek.lastPath)<<",\"seek_error\":"<<quote(previewSeek.error)<<",\"error\":"<<quote(error)<<'}';
   SetExtState(section,"status",s.str().c_str(),false);statusDirty=false;
@@ -161,7 +164,10 @@ void draw(NMLVCUSTOMDRAW* n){
   client.top=std::max(int(client.top),SWELL_GetListViewHeaderHeight(list));
   int left=cell.left+6,top=cell.top+3,width=cell.right-cell.left-12,height=cell.bottom-cell.top-6;
   if(width<=0||height<=0||uint64_t(width)*height>4ULL*1024*1024)return;
-  COLORREF color=ListView_GetItemState(list,r->first,LVIS_SELECTED)?n->clrText:RGB(48,174,170);
+  bool selected=ListView_GetItemState(list,r->first,LVIS_SELECTED)!=0;
+  COLORREF nativeDefault=selected?n->clrText:RGB(48,174,170);
+  uint32_t fallback=(GetRValue(nativeDefault)<<16)|(GetGValue(nativeDefault)<<8)|GetBValue(nativeDefault);
+  COLORREF color=mwt::colorui::native(colors.resolve(selected?1:0,fallback));
   Key key{wave.revision,width,height,color};auto image=images.find(key);
   if(image==images.end()){
     // SWELL uses LICE_MemBitmap; align the context width so its pixel row span
@@ -347,6 +353,8 @@ void timer(){
 }
 void clearImages(){images.clear();imageBytes=0;}
 bool command(int cmd,int){
+  if(cmd==colorAction.accel.cmd){mwt::colorui::show(host.hwnd_main,colors,[](int selected)->uint32_t {return selected?0xffffff:0x30aeaa;});return true;}
+  if(cmd==resetColorAction.accel.cmd){mwt::colorui::close();colors.resetSaved();return true;}
   if(cmd==toggle.accel.cmd){enabled=!enabled;if(!enabled)detach();SetExtState(section,"enabled",enabled?"1":"0",true);statusDirty=true;report();return true;}
   if(cmd==refresh.accel.cmd){previewSeek.cancel();stopSource();cancelHiddenReads({});rows.clear();cache.clear();clearImages();nextScan=0;statusDirty=true;return true;}return false;
 }
@@ -356,16 +364,21 @@ int setting(const char* key,int fallback,int low,int high){auto* v=GetExtState(s
 }
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE,reaper_plugin_info_t* rec){
   if(!rec){
-    if(host.Register){host.Register("-timer",(void*)timer);readers.stop();detach();clearImages();host.Register("-hookcommand",(void*)command);host.Register("-toggleaction",(void*)toggled);host.Register("-gaccel",&toggle);host.Register("-gaccel",&refresh);}
+    if(host.Register){mwt::colorui::close();host.Register("-accelerator",&mwt::colorui::accelerator);host.Register("-timer",(void*)timer);readers.stop();detach();clearImages();host.Register("-hookcommand",(void*)command);host.Register("-toggleaction",(void*)toggled);host.Register("-gaccel",&toggle);host.Register("-gaccel",&refresh);host.Register("-gaccel",&colorAction);host.Register("-gaccel",&resetColorAction);}
     host={};return 0;
   }
   if(rec->caller_version!=REAPER_PLUGIN_VERSION)return 0;
   host=*rec;
   if(!load(GetExtState,"GetExtState")||!load(SetExtState,"SetExtState")||!load(GetToggleState,"GetToggleCommandStateEx")||!load(IsMediaExtension,"IsMediaExtension")||!load(PeakName,"GetPeakFileNameEx")||!load(ClearPeakCache,"ClearPeakCache")||!load(CreateSource,"PCM_Source_CreateFromFileEx")||!load(DestroySource,"PCM_Source_Destroy")||!load(SourceLength,"GetMediaSourceLength")||!load(Channels,"GetMediaSourceNumChannels")||!load(BuildPeaks,"PCM_Source_BuildPeaks")||!load(GetPeaks,"PCM_Source_GetPeaks")){host={};return 0;}
   enabled=std::string(GetExtState(section,"enabled"))!="0";
+  colors.get=GetExtState;colors.set=SetExtState;colors.load();colors.changed=[] {clearImages();if(IsWindow(list))InvalidateRect(list,nullptr,FALSE);statusDirty=true;};
   savedOrder=setting("linux_wave_order",-1,0,1024);savedWidth=setting("linux_wave_width",196,24,4096);
   try{readers.start();}catch(...){host={};return 0;}
   toggle.accel.cmd=host.Register("command_id",(void*)"MWT_TOGGLE");toggle.desc="Media Explorer: Toggle waveform thumbnails";
   refresh.accel.cmd=host.Register("command_id",(void*)"MWT_REFRESH");refresh.desc="Media Explorer: Refresh waveform thumbnail cache";
+  colorAction.accel.cmd=host.Register("command_id",(void*)"MWT_COLORS");colorAction.desc="Media Explorer: Customize waveform colors...";
+  resetColorAction.accel.cmd=host.Register("command_id",(void*)"MWT_COLORS_RESET");resetColorAction.desc="Media Explorer: Reset waveform colors to defaults";
+  host.Register("gaccel",&colorAction);host.Register("gaccel",&resetColorAction);
+  host.Register("accelerator",&mwt::colorui::accelerator);
   host.Register("gaccel",&toggle);host.Register("gaccel",&refresh);host.Register("hookcommand",(void*)command);host.Register("toggleaction",(void*)toggled);host.Register("timer",(void*)timer);statusDirty=true;report();return 1;
 }

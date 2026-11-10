@@ -4,6 +4,7 @@
 #include "wave_geometry.hpp"
 #include "waveform_file.hpp"
 #include "preview_seek.hpp"
+#include "color_dialog.hpp"
 #include <chrono>
 #include <filesystem>
 #include <map>
@@ -28,7 +29,7 @@ namespace mac {void draw(NSRect,NSTableView*,NSInteger);void layoutChanged();}
 
 namespace mac {
 constexpr char section[]="MediaWaveThumbnails";
-constexpr char version[]="0.4.2";
+constexpr char version[]="0.4.3";
 reaper_plugin_info_t host{};
 NSHashTable *roots=nil,*tables=nil;
 NSTableColumn* own=nil;
@@ -44,7 +45,8 @@ uint64_t nextScan{},revision{},ticket{},draws{},directReads{},sourceOpens{},rast
 NSRange observedRange=NSMakeRange(NSNotFound,0);
 NSInteger observedRows=-1;
 std::string error;
-gaccel_register_t toggle{},refresh{};
+gaccel_register_t toggle{},refresh{},colorAction{},resetColorAction{};
+mwt::ColorSettings colors;
 mwt::PeakReaderPool readers;
 mwt::PreviewSeek previewSeek;
 int seekRow=-1;
@@ -86,6 +88,7 @@ void status(){std::ostringstream s;int ready=0;for(const auto& r:rows)if(cache.a
   s<<"{\"platform\":\"macos\",\"version\":"<<quote(version)<<",\"experimental\":false,\"enabled\":"<<(enabled?"true":"false")
    <<",\"attached\":"<<(own&&table()?"true":"false")<<",\"cache\":"<<cache.size()<<",\"visible_files\":"<<rows.size()
    <<",\"ready\":"<<ready<<",\"direct_peak_reads\":"<<directReads<<",\"source_opens\":"<<sourceOpens<<",\"draws\":"<<draws
+   <<",\"color_normal\":"<<quote(colors.text(0))<<",\"color_selected\":"<<quote(colors.text(1))<<",\"color_editing\":"<<(colors.editing?"true":"false")
    <<",\"seek_requests\":"<<previewSeek.requests<<",\"seek_completed\":"<<previewSeek.completed<<",\"seek_cancelled\":"<<previewSeek.cancelled
    <<",\"seek_pending\":"<<(previewSeek.pending()?"true":"false")<<",\"seek_ratio\":"<<previewSeek.lastRatio<<",\"seek_path\":"<<quote(previewSeek.lastPath)<<",\"seek_error\":"<<quote(previewSeek.error)<<",\"error\":"<<quote(error)<<'}';
   SetExtState(section,"status",s.str().c_str(),false);
@@ -247,7 +250,8 @@ void draw(NSRect frame,NSTableView* t,NSInteger row){
   NSColor* color=([t isRowSelected:row]?[NSColor selectedControlTextColor]:[NSColor systemTealColor]);
   color=[color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];if(!color)return;
   CGFloat red=0,green=0,blue=0,alpha=0;[color getRed:&red green:&green blue:&blue alpha:&alpha];
-  uint32_t rgba=(uint32_t(red*255)<<24)|(uint32_t(green*255)<<16)|(uint32_t(blue*255)<<8)|uint32_t(alpha*255);
+  uint32_t fallback=(uint32_t(red*255)<<16)|(uint32_t(green*255)<<8)|uint32_t(blue*255);
+  uint32_t rgba=(colors.resolve([t isRowSelected:row]?1:0,fallback)<<8)|255;
   Key key{wave.revision,width,height,rgba};auto image=images.find(key);
   if(image==images.end()){
     size_t bytes=size_t(width)*height*4;
@@ -281,22 +285,29 @@ void tick(){if(busy||![NSThread isMainThread])return;busy=true;
   busy=false;
 }
 bool command(int cmd,int){if(cmd==toggle.accel.cmd){enabled=!enabled;if(!enabled)detach();SetExtState(section,"enabled",enabled?"1":"0",true);status();return true;}
+  if(cmd==colorAction.accel.cmd){mwt::colorui::show(host.hwnd_main,colors,[](int selected)->uint32_t {NSColor* c=[(selected?[NSColor selectedControlTextColor]:[NSColor systemTealColor]) colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];CGFloat r=0,g=0,b=0,a=0;[c getRed:&r green:&g blue:&b alpha:&a];return (uint32_t(r*255)<<16)|(uint32_t(g*255)<<8)|uint32_t(b*255);});return true;}
+  if(cmd==resetColorAction.accel.cmd){mwt::colorui::close();colors.resetSaved();return true;}
   if(cmd==refresh.accel.cmd){previewSeek.cancel();stopSource();readers.retain({});rows.clear();cache.clear();clearImages();nextScan=0;return true;}return false;}
 int toggled(int cmd){return cmd==toggle.accel.cmd?int(enabled):-1;}
 template<class T>bool load(T& f,const char* name){f=reinterpret_cast<T>(host.GetFunc(name));return f!=nullptr;}
 }
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE,reaper_plugin_info_t* rec){
   using namespace mac;
-  if(!rec){if(host.Register){host.Register("-timer",(void*)tick);readers.stop();detach();clearImages();host.Register("-hookcommand",(void*)command);host.Register("-toggleaction",(void*)toggled);host.Register("-gaccel",&toggle);host.Register("-gaccel",&refresh);}
+  if(!rec){if(host.Register){mwt::colorui::close();host.Register("-accelerator",&mwt::colorui::accelerator);host.Register("-timer",(void*)tick);readers.stop();detach();clearImages();host.Register("-hookcommand",(void*)command);host.Register("-toggleaction",(void*)toggled);host.Register("-gaccel",&toggle);host.Register("-gaccel",&refresh);host.Register("-gaccel",&colorAction);host.Register("-gaccel",&resetColorAction);}
     [[NSNotificationCenter defaultCenter] removeObserver:observer];[observer release];observer=nil;[roots release];roots=nil;[tables release];tables=nil;return 0;}
   if(rec->caller_version!=REAPER_PLUGIN_VERSION)return 0;host=*rec;
   if(!load(GetExtState,"GetExtState")||!load(SetExtState,"SetExtState")||!load(GetToggleState,"GetToggleCommandStateEx")||!load(IsMediaExtension,"IsMediaExtension")||!load(PeakName,"GetPeakFileNameEx")||!load(ClearPeakCache,"ClearPeakCache")||!load(CreateSource,"PCM_Source_CreateFromFileEx")||!load(DestroySource,"PCM_Source_Destroy")||!load(SourceLength,"GetMediaSourceLength")||!load(Channels,"GetMediaSourceNumChannels")||!load(BuildPeaks,"PCM_Source_BuildPeaks")||!load(GetPeaks,"PCM_Source_GetPeaks"))return 0;
   roots=[[NSHashTable weakObjectsHashTable] retain];tables=[[NSHashTable weakObjectsHashTable] retain];observer=[[MWTLayoutObserver alloc] init];
   enabled=std::string(GetExtState(section,"enabled"))!="0";
+  colors.get=GetExtState;colors.set=SetExtState;colors.load();colors.changed=[] {clearImages();if(table())[table() setNeedsDisplay:YES];};
   const char* order=GetExtState(section,"mac_wave_order");if(order&&*order)savedOrder=std::clamp(std::atoi(order),0,1024);
   const char* width=GetExtState(section,"mac_wave_width");if(width&&*width)savedWidth=std::clamp(std::atof(width),24.0,4096.0);
   try{readers.start();}catch(...){return 0;}
   toggle.accel.cmd=host.Register("command_id",(void*)"MWT_TOGGLE");toggle.desc="Media Explorer: Toggle waveform thumbnails";
   refresh.accel.cmd=host.Register("command_id",(void*)"MWT_REFRESH");refresh.desc="Media Explorer: Refresh waveform thumbnail cache";
+  colorAction.accel.cmd=host.Register("command_id",(void*)"MWT_COLORS");colorAction.desc="Media Explorer: Customize waveform colors...";
+  resetColorAction.accel.cmd=host.Register("command_id",(void*)"MWT_COLORS_RESET");resetColorAction.desc="Media Explorer: Reset waveform colors to defaults";
+  host.Register("gaccel",&colorAction);host.Register("gaccel",&resetColorAction);
+  host.Register("accelerator",&mwt::colorui::accelerator);
   host.Register("gaccel",&toggle);host.Register("gaccel",&refresh);host.Register("hookcommand",(void*)command);host.Register("toggleaction",(void*)toggled);host.Register("timer",(void*)tick);status();return 1;
 }
