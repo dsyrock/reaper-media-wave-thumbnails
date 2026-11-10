@@ -132,7 +132,15 @@ LRESULT parentProc(HWND w,UINT message,WPARAM wp,LPARAM lp){
         if(!mwt::previewModifiers()&&row!=rows.end()&&cache.at(row->second).state==1&&cache.at(row->second).published){
           NSRect cell=[t frameOfCellAtColumn:visual row:click->iItem];
           auto path=row->second;
-          if(!path.empty()){seekRow=click->iItem;previewSeek.request(path,mwt::thumbnailRatio(click->ptAction.x,cell.origin.x,NSMaxX(cell)),now());}
+          if(!path.empty()){
+            double fraction=mwt::thumbnailRatio(click->ptAction.x,cell.origin.x,NSMaxX(cell));
+            std::vector<int> order([t numberOfColumns]);
+            if(ListView_GetColumnOrderArray((HWND)t,int(order.size()),order.data())){
+              NMLISTVIEW native=*click;native.hdr.code=NM_CLICK;native.iSubItem=order[0];
+              if(next)next(w,message,wp,(LPARAM)&native);
+              seekRow=click->iItem;previewSeek.request(path,fraction,now());
+            }
+          }
         }
         return 0;
       }

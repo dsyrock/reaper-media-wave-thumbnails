@@ -542,7 +542,14 @@ LRESULT CALLBACK parentProc(HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR
           RECT cell{};auto it=rowWaves.find(click->iItem);
           if(it!=rowWaves.end()&&it->second->state==1&&it->second->published&&ListView_GetSubItemRect(list,click->iItem,column,LVIR_BOUNDS,&cell)){
             auto path=rows.count(click->iItem)?rows.at(click->iItem):std::wstring{};
-            if(!path.empty()){seekRow=click->iItem;previewSeek.request(utf8(path),mwt::thumbnailRatio(click->ptAction.x,cell.left,cell.right),GetTickCount64());statusDirty=true;}
+            if(!path.empty()){
+              double fraction=mwt::thumbnailRatio(click->ptAction.x,cell.left,cell.right);
+              NMITEMACTIVATE native=*click;native.hdr.code=NM_CLICK;native.iSubItem=0;
+              // Let REAPER commit its current preview selection using a valid
+              // native column, without forwarding a double-click insertion.
+              DefSubclassProc(w,m,wp,reinterpret_cast<LPARAM>(&native));
+              seekRow=click->iItem;previewSeek.request(utf8(path),fraction,GetTickCount64());statusDirty=true;
+            }
           }
         }
         return 0; // double-clicking a waveform must not insert into the project

@@ -196,7 +196,12 @@ LRESULT parentProc(HWND w,UINT message,WPARAM wp,LPARAM lp){
         auto row=rows.find(click->iItem);RECT cell{};
         if(!mwt::previewModifiers()&&ownsColumn()&&row!=rows.end()&&cache.at(row->second).state==1&&cache.at(row->second).published&&ListView_GetSubItemRect(list,click->iItem,column,LVIR_BOUNDS,&cell)){
           auto path=row->second;
-          if(!path.empty()){seekRow=click->iItem;previewSeek.request(path,mwt::thumbnailRatio(click->ptAction.x,cell.left,cell.right),now());statusDirty=true;}
+          if(!path.empty()){
+            double fraction=mwt::thumbnailRatio(click->ptAction.x,cell.left,cell.right);
+            NMLISTVIEW native=*click;native.hdr.code=NM_CLICK;native.iSubItem=0;
+            if(next)next(w,message,wp,(LPARAM)&native);
+            seekRow=click->iItem;previewSeek.request(path,fraction,now());statusDirty=true;
+          }
         }
         return 0;
       }
