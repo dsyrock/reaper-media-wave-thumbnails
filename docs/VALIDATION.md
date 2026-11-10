@@ -4,9 +4,13 @@ macOS 适配阶段及跨平台共享层的验证边界单列在 [MACOS.md](MACOS
 
 Linux 原生后端的云端编译、核心及模拟宿主接口测试已通过，详见 [LINUX.md](LINUX.md)。Linux REAPER 内的真实控件与绘图尚未实测，模拟宿主测试不算实际 REAPER 测试。
 
-最新测试日期：2026-11-10（Asia/Shanghai）。Windows 当前版本：0.3.3；REAPER 6.83/7.84 x64。Mac/Linux：0.4.1 preview。
+最新测试日期：2026-11-10（Asia/Shanghai）。Windows 当前开发版本：0.3.4；本轮 REAPER 7.84 x64。Mac/Linux：0.4.2 preview。
 
 按 reaper-test 技能使用 `F:\AGENT\SKILLS\reaper-test\scripts\socket_client.py`，每次握手核对独立资源目录。日常使用的 `C:\REAPER` 未用于本轮测试。
+
+## 0.3.4 / 0.4.2 点击波形定位试听
+
+完整行为、数值和限制见 [CLICK-PREVIEW.md](CLICK-PREVIEW.md)。Windows 7.84 的定位、快速连续点击、切换文件、搜索保留、真实 ListView 鼠标消息路径及原有波形/XML 回归均通过；最终跨平台云端构建全部通过。6.83 安装目录已不存在，本轮未重新实测该版本。
 
 ## 0.3.3 / 0.4.1 XML 与 Linux 旧接口回归
 

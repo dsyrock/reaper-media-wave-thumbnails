@@ -1,12 +1,12 @@
 # Media Explorer 波形缩略图
 
-macOS 实验性适配已通过 GitHub Actions 的 arm64 和 x86_64 编译、核心测试及架构/入口校验，尚未在 Mac REAPER 中运行验证，详情见 [docs/MACOS.md](docs/MACOS.md)。Windows 已实机验证版为下述 0.3.3，Mac/Linux 当前为 0.4.1 preview。
+当前开发版：Windows 0.3.4、Mac/Linux 0.4.2 preview，新增点击波形相对位置进行原生试听。Windows 7.84 已通过定位及回归测试，Mac/Linux 已通过云端构建和核心/模拟宿主测试，真实 UI 待实机验证。操作和验证范围见 [docs/CLICK-PREVIEW.md](docs/CLICK-PREVIEW.md)。
 
-源码和自动构建位于 [GitHub 仓库](https://github.com/dsyrock/reaper-media-wave-thumbnails)。安装包请从 [Release v0.4.1-preview.1](https://github.com/dsyrock/reaper-media-wave-thumbnails/releases/tag/v0.4.1-preview.1) 下载，按系统和架构选择 ZIP。也可在 [已通过的构建](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42724090986) 页底部的 Artifacts 下载开发构建；Actions 产物需要登录 GitHub。
+源码和自动构建位于 [GitHub 仓库](https://github.com/dsyrock/reaper-media-wave-thumbnails)。最新点击试听开发版请从 [已通过的构建](https://github.com/dsyrock/reaper-media-wave-thumbnails/actions/runs/42799354041) 页底部的 Artifacts 下载；需要登录 GitHub。[Release v0.4.1-preview.1](https://github.com/dsyrock/reaper-media-wave-thumbnails/releases/tag/v0.4.1-preview.1) 保留上一版的安装包。
 
 Linux x86_64 实验性后端已通过云端编译、核心测试和模拟宿主接口测试，尚未在 Linux REAPER 内运行验证，安装说明见 [docs/LINUX.md](docs/LINUX.md)。
 
-在 REAPER 原生 Media Explorer 的 Details（详细信息）列表中增加 `Waveform` 列，无需逐个点击音频即可看到整段波形。Windows x64 实验版 0.3.3 已在 REAPER 6.83 和 7.84 实测。
+在 REAPER 原生 Media Explorer 的 Details（详细信息）列表中增加 `Waveform` 列，无需逐个点击音频即可看到整段波形。上一版 0.3.3 已在 REAPER 6.83/7.84 实测；本轮 0.3.4 点击试听在 Windows 7.84 实测。
 
 ## 使用
 
@@ -24,6 +24,7 @@ Linux x86_64 实验性后端已通过云端编译、核心测试和模拟宿主�
 ## 行为
 
 - 优先为可见行生成波形，滚动后继续生成；无需先扫描整个素材库。
+- 单击波形的相对位置进行原生定位试听；点击时下方预览恢复全长显示。拖拽和修饰键选择保留，波形双击不插入工程。详见 [点击试听说明](docs/CLICK-PREVIEW.md)。
 - 排除 MusicXML（xml/musicxml/mxl）、MIDI 和工程/文本格式，不为浏览缩略图自动打开这些文件，避免触发乐谱导入器及其错误弹窗；手动预览/导入仍由 REAPER 处理。
 - 文件夹、数据库和搜索列表共用原生列表及选择行为。
 - 保留原生列的顺序、宽度和隐藏状态。Temporary Mark（表头为 `Mark`）、Fav 等可调整位置；Waveform 自身的位置与宽度单独保存在 REAPER ExtState，支持放在第一栏并跨重启保留。原生应用列布局、重建列或退出保存布局时，暂时移除本扩展列，避免列数冲突。
